@@ -10,10 +10,14 @@ public class DataSeeder implements CommandLineRunner {
 
     private final IngredientRepository repository;
     private final MarketEventFetcher marketEventFetcher;
+    private final MarketEventRepository marketEventRepository;
+    private final RecommendationRepository recommendationRepository;
 
-    public DataSeeder(IngredientRepository repository, MarketEventFetcher marketEventFetcher) {
+    public DataSeeder(IngredientRepository repository, MarketEventFetcher marketEventFetcher, MarketEventRepository marketEventRepository, RecommendationRepository recommendationRepository) {
         this.repository = repository;
         this.marketEventFetcher = marketEventFetcher;
+        this.marketEventRepository = marketEventRepository;
+        this.recommendationRepository = recommendationRepository;
     }
 
     @Override
@@ -84,8 +88,12 @@ public class DataSeeder implements CommandLineRunner {
         }
 
         // 触发一次真实的 Federal Register 抓取
-        marketEventFetcher.fetchAndStore("China");
-        marketEventFetcher.fetchAndStore("Brazil");
+        if (marketEventRepository.count() == 0) {
+                marketEventFetcher.fetchAndStore("China");
+                marketEventFetcher.fetchAndStore("Brazil");
+        } else {
+            System.out.println("=== Market events already seeded, skipping ===");
+        }
     }
 
     private void seed(String name, String category, String originCountry, Map<String, Object> specs) {
