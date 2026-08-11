@@ -7,7 +7,8 @@ in active development.
 ## What this is
 
 An AI agent that replicates, in software, the market-analysis judgment
-I used to do manually in a prior sales role at an international
+I used to do manually in a prior role as a Business Operations
+Analyst at an international
 ingredients distributor: given tariff policy changes, commodity price
 trends, and supply-demand signals, the agent produces sourcing and
 procurement recommendations with a visible reasoning trail.
@@ -17,11 +18,12 @@ capability here — tool calling, retrieval, and (in progress) memory
 and reasoning traces — built on top of a production-style backend, not
 a demo script.
 
-**Why this domain**: I closed a $1M purchase order in a prior Business Operations Analyst role using exactly this kind of manual analysis — tracking tariff
-policy and supply-demand signals to advise a client on ingredient
-sourcing. This project rebuilds that judgment process as a real
-system, informed by first-hand understanding of what the analysis is
-actually supposed to accomplish.
+**Why this domain**: I secured a $1M purchase order as a Business
+Operations Analyst using exactly this kind of manual analysis —
+tracking tariff policy and supply-demand signals to advise a client
+on ingredient sourcing. This project rebuilds that judgment process
+as a real system, informed by first-hand understanding of what the
+analysis is actually supposed to accomplish.
 
 ## Architecture
 
