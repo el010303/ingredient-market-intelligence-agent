@@ -17,8 +17,7 @@ capability here — tool calling, retrieval, and (in progress) memory
 and reasoning traces — built on top of a production-style backend, not
 a demo script.
 
-**Why this domain**: I closed a $1M purchase order in a prior sales
-role using exactly this kind of manual analysis — tracking tariff
+**Why this domain**: I closed a $1M purchase order in a prior Business Operations Analyst role using exactly this kind of manual analysis — tracking tariff
 policy and supply-demand signals to advise a client on ingredient
 sourcing. This project rebuilds that judgment process as a real
 system, informed by first-hand understanding of what the analysis is
@@ -64,13 +63,20 @@ blocks the request path and can retry independently on failure.
 - 22 seeded ingredient records across 4 product categories (sweeteners,
   plant proteins, collagens, inulin/Jerusalem artichoke), reflecting
   real sourcing origins (China, Brazil, Sri Lanka, Canada, Finland)
-
-**In progress:**
-- Tool-calling layer: `get_ingredient_info`, `get_market_events`, and
-  `summarize_tariff_event` (LLM-based extraction of tariff rate
+- `summarize_tariff_event`: LLM-based extraction of tariff rate
   changes from unstructured policy text — regex alone couldn't handle
   real-world phrasing like *"initial tariff level of 0 percent,
-  increasing in 18 months...to a rate to be announced"*)
+  increasing in 18 months...to a rate to be announced"*. Verified
+  against real Federal Register data across three distinct cases:
+  a rate increase with an unresolved future number (correctly
+  extracts what's known, returns `null` for the undecided rate rather
+  than guessing), a multi-country revocation notice (correctly
+  splits into per-country records), and a procedural notice with no
+  tariff data at all (correctly returns all fields `null` instead of
+  hallucinating numbers)
+
+**In progress:**
+- Tool-calling layer: `get_ingredient_info`, `get_market_events`
 - End-to-end loop: query → tool calls → generated recommendation
 
 **Not started yet:** hand-rolled state machine orchestration, memory
@@ -145,6 +151,33 @@ than depending on a library) also means being able to explain the
 orchestration's actual mechanics, not just that a framework was
 used.
 
+### ADR-005: LLM-based extraction over regex for tariff rate parsing
+
+**Context**: `MarketEventFetcher` originally used a regex
+(`\d+\s*percent`) to pull tariff rates out of Federal Register
+abstracts. Real data broke this quickly — announcements routinely
+phrase rate changes as multi-clause sentences with unresolved future
+values (e.g. a rate that "increases in 18 months to a rate to be
+announced"), which no fixed pattern can parse correctly.
+
+**Decision**: Extract tariff rate changes via an LLM call
+(`summarize_tariff_event`) instead, prompted to return a structured
+JSON object (country, old/new rate, effective date, one-line summary)
+and to return `null` rather than guess when a value isn't stated in
+the source text.
+
+**Consequences**: This required handling two real-world quirks the
+regex version never had to deal with: (1) the model sometimes wraps
+JSON output in a markdown code fence even when explicitly told not
+to — handled by stripping the fence before parsing; (2) a single
+policy announcement can reference multiple countries (e.g. a
+revocation notice naming both India and China) — handled by
+splitting the LLM's country field and writing one `market_events`
+row per country, sharing the same `source_url` so it's traceable
+back to a single source document. The regex-vs-LLM extraction
+success rate on real Federal Register data is being tracked as a
+concrete before/after comparison (see project notes).
+
 ## Future Work (explicitly out of scope for now)
 
 - **Streaming responses (SSE/WebSocket)** — would require frontend
@@ -165,6 +198,7 @@ used.
 
 ## Tech stack
 
-Spring Boot (Java 17) · PostgreSQL + pgvector · RabbitMQ · Redis ·
-Spring Security · Python (embedding generation) · Next.js + TypeScript
+Spring Boot (Java 17) · PostgreSQL + pgvector · OpenAI API
+(`gpt-4o-mini`, tariff extraction) · RabbitMQ · Redis · Spring
+Security · Python (embedding generation) · Next.js + TypeScript
 (planned) · AWS EC2 (planned)
