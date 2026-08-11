@@ -21,10 +21,16 @@ public class MarketEvent {
     @Column(columnDefinition = "TEXT")
     private String rawText;
 
+    @Column(columnDefinition = "TEXT")
+    private String llmSummary;
+
     private String sourceUrl;
     private LocalDate eventDate;
     private Double oldRate;
     private Double newRate;
+    private Double extractOldRate;
+    private Double extractNewRate;
+    private LocalDate effectiveDate;
 
     // getters and setters
     public Long getId() {return id; }
@@ -38,6 +44,8 @@ public class MarketEvent {
     public void setTitle(String title) { this.title = title; }
     public String getRawText() { return rawText; }
     public void setRawText(String rawText) { this.rawText = rawText; }
+    public String getLlmSummary() { return llmSummary; }
+    public void setLlmSummary(String llmSummary) { this.llmSummary = llmSummary; }
     public String getSourceUrl() { return sourceUrl; }
     public void setSourceUrl(String sourceUrl) { this.sourceUrl = sourceUrl; }
     public LocalDate getEventDate() { return eventDate; }
@@ -46,4 +54,10 @@ public class MarketEvent {
     public void setOldRate(Double oldRate) { this.oldRate = oldRate; }
     public Double getNewRate() { return newRate; }
     public void setNewRate(Double newRate) { this.newRate = newRate; }
+    public Double getExtractOldRate() { return extractOldRate; }
+    public void setExtractOldRate(Double extractOldRate) {this.extractOldRate = extractOldRate; }
+    public Double getExtractNewRate() { return extractNewRate; }
+    public void setExtractNewRate(Double extractNewRate) { this.extractNewRate = extractNewRate; }
+    public LocalDate getEffectiveDate() { return effectiveDate; }
+    public void setEffectiveDate(LocalDate effectiveDate) { this.effectiveDate = effectiveDate; }
 }

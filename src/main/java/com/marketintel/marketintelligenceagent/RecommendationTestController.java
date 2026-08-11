@@ -4,14 +4,31 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.bind.annotation.GetMapping;
 import java.util.List;
 import java.util.Map;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.web.bind.annotation.PathVariable;
 
 @RestController
 public class RecommendationTestController {
     
     private final RecommendationRepository repository;
+    private final TariffSummarizerService tariffSummarizerService;
+    private final MarketEventRepository marketEventRepository;
 
-    public RecommendationTestController(RecommendationRepository repository) {
+    @Value("${openai.api.key}")
+    private String openaiApiKey;
+
+    public RecommendationTestController(RecommendationRepository repository, TariffSummarizerService tariffSummarizerService, MarketEventRepository marketEventRepository) {
         this.repository = repository;
+        this.tariffSummarizerService = tariffSummarizerService;
+        this.marketEventRepository = marketEventRepository;
+    }
+
+    @GetMapping("/test/openai-key")
+    public String testKeyLoaded() {
+        if (openaiApiKey == null || openaiApiKey.isBlank()) {
+            return "Key not loaded";
+        }
+        return "Key loaded, starts with: " + openaiApiKey.substring(0, 7) + "...";
     }
 
     @GetMapping("/test/recommendation")
@@ -30,5 +47,21 @@ public class RecommendationTestController {
         ));
         repository.save(testRec);
         return repository.findAll();
+    }
+
+    @GetMapping("/test/summarize/{id}")
+    public String testSummarize(@PathVariable Long id) {
+        MarketEvent event = marketEventRepository.findById(id).orElseThrow();
+        return tariffSummarizerService.summarize(event.getRawText());
+    }
+
+    @GetMapping("/test/summarize-and-store/{id}")
+    public String testSummarizeAndStore(@PathVariable Long id) {
+        try{
+            tariffSummarizerService.summarizeAndStore(id);
+            return "Done summarizing and storing for event ID: " + id;
+        } catch (Exception e) {
+            return "Failed: " + e.getMessage();
+        }
     }
 }
