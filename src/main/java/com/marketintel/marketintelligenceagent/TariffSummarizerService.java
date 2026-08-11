@@ -28,11 +28,15 @@ public class TariffSummarizerService {
     public String summarize(String rawText) {
         String url = "https://api.openai.com/v1/chat/completions";
 
-        String prompt = "Extract the following information from this tariff "
-                + "policy announcement, and return ONLY a JSON object with "
-                + "these fields: country, old_rate (number or null), "
-                + "new_rate (number or null), effective_date (string or null), "
-                + "summary (one sentence).\n\nText: " + rawText;
+        String prompt = "Extract the following information from this U.S. tariff "
+        + "policy announcement. Note: these announcements are issued by "
+        + "the United States government, but the 'country' field should "
+        + "be the FOREIGN country whose imports are affected by this "
+        + "policy (e.g. the country goods are imported FROM), not the "
+        + "United States itself. Return ONLY a JSON object with these "
+        + "fields: country, old_rate (number or null), new_rate (number "
+        + "or null), effective_date (string or null), summary (one sentence)."
+        + "\n\nText: " + rawText;
 
         String requestBody = """
                 {
