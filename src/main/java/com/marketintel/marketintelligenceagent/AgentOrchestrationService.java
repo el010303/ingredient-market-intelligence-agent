@@ -70,6 +70,10 @@ public class AgentOrchestrationService {
             JsonNode message = response.path("choices").get(0).path("message");
             JsonNode toolCalls = message.path("tool_calls");
 
+            System.out.println("=== Round " + round + " ===");
+            System.out.println("Tool calls: " + toolCalls.toString());
+            System.out.println("Content: " + message.path("content").asText());
+
             if (!toolCalls.isArray() || toolCalls.isEmpty()) {
                 return message.path("content").asText();
             }
@@ -95,11 +99,11 @@ public class AgentOrchestrationService {
     }
 
     private String executeToolCall(String functionName, JsonNode args) {
-        return switch (functionName) {
-            case "get_ingredient_info" -> agentToolService.getIngredientInfo(args.path("name").asText()).toString();
-            case "get_market_events" -> agentToolService.getMarketEvents(args.path("country").asText()).toString();
-            default -> "Unknown tool: " + functionName;
-        };
+      return switch (functionName) {
+          case "get_ingredient_info" -> agentToolService.getIngredientInfoAsText(args.path("name").asText());
+          case "get_market_events" -> agentToolService.getMarketEventsAsText(args.path("country").asText());
+          default -> "Unknown tool: " + functionName;
+      };
     }
 
     private JsonNode callOpenAiWithTools(ArrayNode messages) {
