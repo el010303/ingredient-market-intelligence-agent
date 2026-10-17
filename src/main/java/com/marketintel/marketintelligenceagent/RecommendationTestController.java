@@ -6,6 +6,8 @@ import java.util.List;
 import java.util.Map;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RequestParam;
 
 @RestController
 public class RecommendationTestController {
@@ -14,15 +16,17 @@ public class RecommendationTestController {
     private final TariffSummarizerService tariffSummarizerService;
     private final MarketEventRepository marketEventRepository;
     private final AgentToolService agentToolService;
+    private final AgentOrchestrationService agentOrchestrationService;
 
     @Value("${openai.api.key}")
     private String openaiApiKey;
 
-    public RecommendationTestController(RecommendationRepository repository, TariffSummarizerService tariffSummarizerService, MarketEventRepository marketEventRepository, AgentToolService agentToolService) {
+    public RecommendationTestController(RecommendationRepository repository, TariffSummarizerService tariffSummarizerService, MarketEventRepository marketEventRepository, AgentToolService agentToolService, AgentOrchestrationService agentOrchestrationService) {
         this.repository = repository;
         this.tariffSummarizerService = tariffSummarizerService;
         this.marketEventRepository = marketEventRepository;
         this.agentToolService = agentToolService;
+        this.agentOrchestrationService = agentOrchestrationService;
     }
 
     @GetMapping("/test/openai-key")
@@ -91,4 +95,10 @@ public class RecommendationTestController {
 
         return result.toString();
     }
+
+    @GetMapping("/test/agent-query")
+    public String testAgentQuery(@RequestParam String q) {
+        return agentOrchestrationService.handleQuery(q);
+    }
+
 }
