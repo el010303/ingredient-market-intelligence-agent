@@ -8,6 +8,10 @@ import org.springframework.stereotype.Service;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.*;
 import org.springframework.web.client.RestTemplate;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.LinkedHashMap;
 
 @Service
 public class AgentOrchestrationService {
@@ -18,6 +22,8 @@ public class AgentOrchestrationService {
     private final RestTemplate restTemplate = new RestTemplate();
     private final JsonMapper jsonMapper = JsonMapper.builder().build();
     private final AgentToolService agentToolService;
+
+    private final RecommendationRepository recommendationRepository;
 
     private static final int MAX_ROUNDS = 4;
 
@@ -54,11 +60,13 @@ public class AgentOrchestrationService {
             ]
             """;
 
-    public AgentOrchestrationService(AgentToolService agentToolService) {
+    public AgentOrchestrationService(AgentToolService agentToolService, RecommendationRepository recommendationRepository) {
         this.agentToolService = agentToolService;
+        this.recommendationRepository = recommendationRepository;
     }
 
     public String handleQuery(String userQuery) {
+        List<Map<String, Object>> toolTrace = new ArrayList<>();
         ArrayNode messages = jsonMapper.createArrayNode();
         ObjectNode userMessage = jsonMapper.createObjectNode();
         userMessage.put("role", "user");
@@ -75,7 +83,9 @@ public class AgentOrchestrationService {
             System.out.println("Content: " + message.path("content").asText());
 
             if (!toolCalls.isArray() || toolCalls.isEmpty()) {
-                return message.path("content").asText();
+                String answer = message.path("content").asText();
+                saveRecommendation(userQuery, answer, toolTrace);
+                return answer;
             }
             
             messages.add(message);
@@ -87,6 +97,11 @@ public class AgentOrchestrationService {
                 JsonNode args = jsonMapper.readTree(argsJson);
 
                 String result = executeToolCall(functionName, args);
+                Map<String, Object> traceEntry = new LinkedHashMap<>();
+                traceEntry.put("round", round);
+                traceEntry.put("tool", functionName);
+                traceEntry.put("arguments", argsJson);
+                toolTrace.add(traceEntry);
 
                 ObjectNode toolMessage = jsonMapper.createObjectNode();
                 toolMessage.put("role", "tool");
@@ -106,6 +121,14 @@ public class AgentOrchestrationService {
       };
     }
 
+    private void saveRecommendation(String userQuery, String answer, List<Map<String, Object>> toolTrace) {
+        Recommendation rec = new Recommendation();
+        rec.setQueryType("parameter_optimization");
+        rec.setCustomerContext(userQuery);
+        rec.setRecommendedOptions(List.of(Map.of("answer", answer)));
+        rec.setReasoningTrace(Map.of("tool_calls", toolTrace));
+        recommendationRepository.save(rec);
+    }
     private JsonNode callOpenAiWithTools(ArrayNode messages) {
         ObjectNode requestBody = jsonMapper.createObjectNode();
         requestBody.put("model", "gpt-4o-mini");
@@ -127,4 +150,6 @@ public class AgentOrchestrationService {
         }
         return jsonMapper.readTree(body);
     }
+
+    
 }
