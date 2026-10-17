@@ -56,6 +56,20 @@ public class AgentOrchestrationService {
                     "required": ["country"]
                   }
                 }
+              },
+              {
+                "type": "function",
+                "function": {
+                  "name": "search_market_events",
+                  "description": "Semantic search over trade and tariff events by topic. Use this for open-ended questions that are not tied to one specific country.",
+                  "parameters": {
+                    "type": "object",
+                    "properties": {
+                      "query": {"type": "string", "description": "A natural-language description of the topic to search for"}
+                    },
+                    "required": ["query"]
+                  }
+                }
               }
             ]
             """;
@@ -117,6 +131,7 @@ public class AgentOrchestrationService {
       return switch (functionName) {
           case "get_ingredient_info" -> agentToolService.getIngredientInfoAsText(args.path("name").asText());
           case "get_market_events" -> agentToolService.getMarketEventsAsText(args.path("country").asText());
+          case "search_market_events" -> agentToolService.searchMarketEventsAsText(args.path("query").asText());
           default -> "Unknown tool: " + functionName;
       };
     }

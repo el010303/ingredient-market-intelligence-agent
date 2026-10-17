@@ -34,3 +34,6 @@ build/
 
 ### local properties ###
 application-local.properties
+
+embedding-script/.env
+embedding-script/.venv/
