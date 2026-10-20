@@ -3,7 +3,9 @@ package com.marketintel.marketintelligenceagent;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RestController;
 import java.util.List;
+import org.springframework.context.annotation.Profile;
 
+@Profile("local")
 @RestController
 public class DataPipelineTestController {
 
