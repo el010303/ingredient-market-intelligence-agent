@@ -83,6 +83,18 @@ public class DataSeeder implements CommandLineRunner {
             seed("Jerusalem Artichoke Extract", "inulin_jerusalem_artichoke", "Finland",
                     Map.of("form", "powder"));
 
+            // ---- Food Additives ----
+            seed("Citric Acid", "food_additive", "China",
+                    Map.of("form", "powder"));
+            seed("Xanthan Gum", "food_additive", "China",
+                    Map.of("form", "powder"));
+            seed("Glycine", "food_additive", "China",
+                    Map.of("form", "powder"));
+            seed("Vanillin", "food_additive", "China",
+                    Map.of("form", "powder"));
+            seed("Monosodium Glutamate", "food_additive", "China",
+                    Map.of("form", "crystal"));
+
             System.out.println("=== Seeded " + repository.count() + " ingredients ===");
             printAll();
         }

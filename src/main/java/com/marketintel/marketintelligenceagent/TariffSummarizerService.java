@@ -8,7 +8,6 @@ import org.springframework.http.*;
 import org.springframework.web.client.RestTemplate;
 
 import java.time.LocalDate;
-import java.util.Arrays;
 import java.util.List;
 
 @Service
@@ -60,58 +59,85 @@ public class TariffSummarizerService {
 
     // Summary + analyst + separate country
     public void summarizeAndStore(Long eventId) {
-        MarketEvent original = marketEventRepository.findById(eventId).orElseThrow();
+    MarketEvent original = marketEventRepository.findById(eventId).orElseThrow();
 
-        String llmResultJson = summarize(original.getRawText());
-        llmResultJson = stripMarkdownCodeBlock(llmResultJson);
-        JsonNode result = jsonMapper.readTree(llmResultJson);
+    String input = original.getRawText() != null ? original.getRawText() : original.getTitle();
+    String llmResultJson = stripMarkdownCodeBlock(summarize(input));
+    JsonNode result = jsonMapper.readTree(llmResultJson);
 
-        String countryRaw = result.path("country").asText("");
-        Double oldRate = result.path("old_rate").isNull() ? null : result.path("old_rate").asDouble();
-        Double newRate = result.path("new_rate").isNull() ? null : result.path("new_rate").asDouble();
-        String summary = result.path("summary").asText(null);
-        LocalDate effectiveDate = parseDate(result.path("effective_date").asText(null));
-
-        List<String> countries = Arrays.stream(countryRaw.split("\\s+and\\s+|,\\s*"))
-                .map(String::trim)
-                .filter(c -> !c.isBlank())
-                .toList();
-
-        if (countries.isEmpty()) {
-            countries = List.of(original.getCountry());
+    // 统一成"每个国家一条"的列表：数组时每个元素一条；单个对象时按国家字符串拆分
+    List<JsonNode> items = new java.util.ArrayList<>();
+    List<String> countries = new java.util.ArrayList<>();
+    if (result.isArray()) {
+        for (JsonNode item : result) {
+            items.add(item);
+            countries.add(normalizeCountry(item.path("country").asText("")));
         }
-
-        for (int i = 0; i < countries.size(); i++) {
-            String country = countries.get(i);
-            MarketEvent target;
-
-            if (i == 0) {
-                target = original;
-                target.setCountry(country);
-            } else {
-                boolean exists = marketEventRepository.findAll().stream()
-                        .anyMatch(e -> country.equals(e.getCountry())
-                                && original.getSourceUrl().equals(e.getSourceUrl()));
-                if (exists) {
-                    continue;
-                }
-
-                target = new MarketEvent();
-                target.setEventType(original.getEventType());
-                target.setCountry(country);
-                target.setTitle(original.getTitle());
-                target.setRawText(original.getRawText());
-                target.setSourceUrl(original.getSourceUrl());
-                target.setEventDate(original.getEventDate());
+    } else {
+        for (String c : result.path("country").asText("").split("\\s+and\\s+|,\\s*")) {
+            if (!c.isBlank()) {
+                items.add(result);
+                countries.add(normalizeCountry(c));
             }
-
-            target.setExtractOldRate(oldRate);
-            target.setExtractNewRate(newRate);
-            target.setEffectiveDate(effectiveDate);
-            target.setLlmSummary(summary);
-
-            marketEventRepository.save(target);
         }
+    }
+
+    if (items.isEmpty()) {
+        items.add(result);
+        countries.add(original.getCountry());
+    }
+
+    for (int i = 0; i < items.size(); i++) {
+        JsonNode item = items.get(i);
+        String country = countries.get(i);
+        if (country == null || country.isBlank()) continue;
+
+        MarketEvent target;
+        if (i == 0) {
+            target = original;
+        } else {
+            boolean exists = marketEventRepository.findAll().stream()
+                    .anyMatch(e -> country.equals(e.getCountry())
+                            && original.getSourceUrl().equals(e.getSourceUrl()));
+            if (exists) continue;
+            target = new MarketEvent();
+            target.setEventType(original.getEventType());
+            target.setTitle(original.getTitle());
+            target.setRawText(original.getRawText());
+            target.setSourceUrl(original.getSourceUrl());
+            target.setEventDate(original.getEventDate());
+        }
+
+        target.setCountry(country);
+        target.setExtractOldRate(item.path("old_rate").isNumber() ? item.path("old_rate").asDouble() : null);
+        target.setExtractNewRate(item.path("new_rate").isNumber() ? item.path("new_rate").asDouble() : null);
+        target.setEffectiveDate(parseDate(item.path("effective_date").asText(null)));
+        target.setLlmSummary(item.path("summary").asText(null));
+        marketEventRepository.save(target);
+    }
+}
+
+    private String normalizeCountry(String c) {
+        String s = c.trim().replaceFirst("(?i)^the\\s+", "");
+        if (s.equalsIgnoreCase("People's Republic of China") || s.equalsIgnoreCase("PRC")) return "China";
+        if (s.equalsIgnoreCase("Republic of Indonesia")) return "Indonesia";
+        if (s.equalsIgnoreCase("Republic of Korea") || s.equalsIgnoreCase("South Korea")) return "Korea";
+        return s;
+    }
+
+    public void summarizePending() {
+        List<Long> ids = marketEventRepository.findAll().stream()
+                .filter(e -> e.getLlmSummary() == null)
+                .map(MarketEvent::getId)
+                .toList();
+        System.out.println("Summarizing " + ids.size() + " events");
+        for (Long id : ids) {
+            try {
+                summarizeAndStore(id);
+            } catch (Exception e) {
+                System.out.println("Summarize failed for id=" + id + ": " + e.getMessage());
+            }
+            }
     }
 
     private LocalDate parseDate(String dateStr) {
@@ -120,6 +146,11 @@ public class TariffSummarizerService {
         }
         try {
             return LocalDate.parse(dateStr);
+        } catch (Exception ignored) {
+        }
+        try {
+            return LocalDate.parse(dateStr.trim(),
+                    java.time.format.DateTimeFormatter.ofPattern("MMMM d, yyyy", java.util.Locale.ENGLISH));
         } catch (Exception e) {
             System.out.println("Failed to parse effective_date: " + dateStr);
             return null;
