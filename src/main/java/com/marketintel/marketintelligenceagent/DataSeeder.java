@@ -4,7 +4,9 @@ import org.springframework.boot.CommandLineRunner;
 import org.springframework.stereotype.Component;
 import java.util.Map;
 import java.util.List;
+import org.springframework.context.annotation.Profile;
 
+@Profile("local")
 @Component
 public class DataSeeder implements CommandLineRunner {
 
