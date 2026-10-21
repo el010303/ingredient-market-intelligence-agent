@@ -1,0 +1,90 @@
+# Known Issues & Limitations
+
+> Last updated: 2026-10-20
+>
+> This file tracks issues that are **known but not yet fixed**. When an issue is resolved, it moves to the [Changelog](#changelog) at the bottom with a note on how it was fixed.
+>
+> Severity: 🔴 correctness / security · 🟡 quality / maintainability · ⚪ cosmetic or accepted
+
+---
+
+## Priorities
+
+| ID | Issue | Why it's next | Est. effort |
+|----|-------|---------------|-------------|
+| P5 | Summarization and embedding are triggered manually | Being replaced by an async RabbitMQ pipeline (in progress) | Module |
+| R1 | No recency weighting in retrieval | Older, concluded reviews can be described as "ongoing"; in a glycine query, a 2026 filing ranked below a 2024 one | 1–2 h |
+| R7 | Answers don't cite source links | Users can't verify claims against the original filing | 30 min |
+| T1 | No unit tests | Needed as a safety net before the pipeline refactor | 2–3 h |
+
+---
+
+## 1. Deployment & Security
+
+| ID | Sev. | Issue | Current state / workaround | Planned fix |
+|----|------|-------|----------------------------|-------------|
+| D1 | 🔴 | HTTP only, no TLS | API key travels in plaintext | Domain + Nginx reverse proxy + Let's Encrypt |
+| D2 | 🟡 | Ephemeral public IP (no Elastic IP) | IP changes on instance stop/start | Attach an Elastic IP before publishing a demo URL |
+| D3 | 🟡 | SSH inbound rule is pinned to a single client IP | SSH times out from a new network until the Security Group rule is updated (never opened to `0.0.0.0/0`) | Move to SSM Session Manager / EC2 Instance Connect and close port 22 |
+| D7 | 🟡 | t3 instances default to "unlimited" CPU credits; building on the server could incur charges | JAR is built locally and copied over with `scp` | Keep builds off the server (CI later) |
+| D9 | ⚪ | `pg_restore` reports `must be owner of extension vector` on the `COMMENT` step | Harmless; data restores fully | Won't fix |
+| D10 | 🟡 | Hibernate `show-sql` is on; `DataSeeder` prints every ingredient to stdout | Noisy logs, including in journald on EC2 | Disable `show-sql` outside the `local` profile; switch prints to debug-level logging |
+
+## 2. Data Pipeline
+
+| ID | Sev. | Issue | Current state / workaround | Planned fix |
+|----|------|-------|----------------------------|-------------|
+| P1 | 🔴 | Single data source (U.S. Federal Register API) | — | Add two more sources (candidates: World Bank, trade news RSS) |
+| P2 | 🟡 | USITC HTS data explored but not integrated | — | Deferred |
+| P3 | 🟡 | Data is concentrated in 7 AD/CVD cases, mostly China-origin | 100 filings → 122 rows (one row per affected country) across 11 countries | Broaden keyword set as more sources come online |
+| P4 | ⚪ | ~9 filings have no abstract; summaries fall back to the title | Lower-quality summaries for those rows | Optional: fetch full text |
+| P5 | 🟡 | Summarization and embedding are triggered manually (local-only endpoint / Python script) | Not yet an automated pipeline | **In progress:** RabbitMQ — fetch → `events.summarize` → `events.embed`, with retries, a dead-letter queue, and an explicit `status` column |
+| P6 | 🟡 | Edited summaries are not re-embedded | `embed_events.py` only processes rows where `embedding IS NULL` | Track `embedded_at` or a content hash |
+| P7 | 🟡 | `normalizeCountry` is a hand-maintained mapping | New variants (e.g. "Kingdom of Thailand") slip through | Map to ISO 3166 country codes |
+| P8 | 🟡 | The LLM occasionally returns the issuing country (U.S.) as the affected country | One row was corrected manually | Post-extraction validation: flag `country == "United States"` |
+| P9 | ⚪ | One `effective_date` failed to parse | `parseDate` handles ISO and `MMMM d, yyyy` only | Add formats, or require ISO-8601 in the prompt |
+| P11 | ⚪ | Regex-extracted rate columns (`old_rate` / `new_rate`) are still present | Kept intentionally for a regex-vs-LLM extraction comparison | Remove after the comparison is recorded |
+| P12 | 🟡 | Duplicate check in `summarizeAndStore` uses `findAll().stream()` — O(n) per row | Fine at 122 rows; won't scale | Derived query `existsByCountryAndSourceUrl` + unique index on `(source_url, country)` |
+| P13 | 🟡 | `summarizeAndStore` is not `@Transactional` | A multi-country filing could be written partially if a save fails mid-loop | Wrap DB writes in a transaction; keep the LLM call outside it |
+| P14 | ⚪ | 7 of 12 keywords returned 0 new filings (sucralose, ascorbic acid, collagen, gelatin, stevia, sorbitol, pea protein*) | Expected — no recent AD/CVD activity for those products | None. *Pea protein rows come from an earlier fetch |
+
+## 3. Retrieval & Agent
+
+| ID | Sev. | Issue | Current state / workaround | Planned fix |
+|----|------|-------|----------------------------|-------------|
+| R1 | 🔴 | No recency weighting | Concluded investigations can be presented as current | `score = similarity × decay(age)`, or an `event_date` term in the SQL ranking |
+| R2 | 🟡 | Similarity threshold (0.30) is a heuristic | Not backed by an eval set | Tune against a ~20-query eval set |
+| R3 | 🟡 | `DISTINCT ON (source_url)` keeps one row per filing | Multi-country filings may surface the wrong country | `DISTINCT ON (source_url, country)` |
+| R4 | 🟡 | `get_ingredient_info` / `get_market_events` load all rows and filter in memory | Acceptable at current size | Repository queries |
+| R5 | 🟡 | Country lookup is exact-match and depends on normalization | Unnormalized variants are missed | Fixed together with P7 |
+| R6 | ⚪ | `query_type` is hard-coded; `recommended_options` stores free text | Works, but not structured | Intent classification + structured options |
+| R7 | 🟡 | Answers don't include source links | Claims aren't verifiable by the user | Return `source_url` from tools; require citations in the prompt |
+| R8 | 🟡 | Occasional over-inference (e.g. price trends not present in the data) | — | Stricter "tool results only" instruction + groundedness check |
+| R9 | 🟡 | No evaluation loop | Quality is judged by manual inspection | Small eval set with manual scoring |
+
+## 4. Testing & Code Quality
+
+| ID | Sev. | Issue | Planned fix |
+|----|------|-------|-------------|
+| T1 | 🔴 | No unit tests; builds use `-DskipTests` | Start with pure functions and the auth filter: `normalizeCountry`, `parseDate`, `stripMarkdownCodeBlock`, `ApiKeyFilter` |
+| T2 | ⚪ | Logging via `System.out.println` | SLF4J `Logger` |
+| T3 | ⚪ | Each service creates its own `new RestTemplate()` | Single shared `@Bean` with timeouts configured |
+| T4 | 🟡 | OpenAI calls have no timeout or retry | Connect/read timeouts; exponential backoff on 429 / 5xx |
+
+---
+
+## Changelog
+
+| Date | Issue | Fix |
+|------|-------|-----|
+| 2026-10-20 | **P10** — If the first extracted country was blank, or the LLM omitted `summary`, `llm_summary` stayed `null` and the row was re-sent to the LLM on every run | Fall back to the original row's country; write an explicit `[no summary extracted]` marker so "processed, no result" is distinguishable from "not yet processed" |
+| 2026-10-20 | **D5** — Spring Security logged a generated default password at startup | Provide a `UserDetailsService` bean that rejects all usernames (auth is API-key based) |
+| 2026-10-20 | **D6** — `spring.jpa.open-in-view` warning | Set `spring.jpa.open-in-view=false`; verified no `LazyInitializationException` on the agent endpoint |
+| 2026-10-20 | Deploys overwrote the running JAR in place | Upload as `app.jar.new` → stop → keep `app.jar.bak` for rollback → swap → start |
+| 2026-10 | Agent answers were generic because tool results were entity `toString()` output | Added `*AsText` formatters for tool results |
+| 2026-10 | Broad keywords pulled in unrelated FDA notices (23 rows) | Removed the noise; added a trade-remedy term filter (antidumping / countervailing / tariff / duty / Section 301) |
+| 2026-10 | "PRC" and "China" stored as separate countries | Data fix + `normalizeCountry` |
+| 2026-10 | Multi-country notices returned a JSON array → rows ended up with `Unknown` country and no summary | Rewrote `summarizeAndStore` to write one row per country |
+| 2026-10 | Dates like "July 29, 2024" failed to parse | Added `MMMM d, yyyy` format to `parseDate` |
+| 2026-10 | `/test/*` endpoints were reachable in production | Restricted to `@Profile("local")` |
+| 2026-10 | API had no authentication | `ApiKeyFilter` (`X-API-Key` header, constant-time comparison) |

@@ -90,14 +90,21 @@ public class TariffSummarizerService {
     for (int i = 0; i < items.size(); i++) {
         JsonNode item = items.get(i);
         String country = countries.get(i);
-        if (country == null || country.isBlank()) continue;
+        if (country == null || country.isBlank()) {
+            if (i == 0) {
+                country = original.getCountry();
+            } else {
+            continue;                      
+            }
+        }
+    final String finalCountry = country;
 
         MarketEvent target;
         if (i == 0) {
             target = original;
         } else {
             boolean exists = marketEventRepository.findAll().stream()
-                    .anyMatch(e -> country.equals(e.getCountry())
+                    .anyMatch(e -> finalCountry.equals(e.getCountry())
                             && original.getSourceUrl().equals(e.getSourceUrl()));
             if (exists) continue;
             target = new MarketEvent();
@@ -112,7 +119,11 @@ public class TariffSummarizerService {
         target.setExtractOldRate(item.path("old_rate").isNumber() ? item.path("old_rate").asDouble() : null);
         target.setExtractNewRate(item.path("new_rate").isNumber() ? item.path("new_rate").asDouble() : null);
         target.setEffectiveDate(parseDate(item.path("effective_date").asText(null)));
-        target.setLlmSummary(item.path("summary").asText(null));
+        String summary = item.path("summary").asText(null);
+        if ((summary == null || summary.isBlank()) && i == 0) {
+            summary = "[no summary extracted]"; 
+        }
+        target.setLlmSummary(summary);
         marketEventRepository.save(target);
     }
 }
