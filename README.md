@@ -1,206 +1,260 @@
 # Ingredient & Trade Market Intelligence Agent
 
-**Status: Phase 0 in progress** — data layer implemented and verified,
-real-time ingestion pipeline live, AI agent layer (tool calling + RAG)
-in active development.
+An LLM agent that answers ingredient-sourcing questions ("what's the tariff risk on glycine from India?") using only evidence retrieved from U.S. trade-remedy filings. It's backed by an asynchronous, failure-tested ingestion pipeline and deployed on AWS EC2.
 
-## What this is
+| | |
+|---|---|
+| **Problem** | Sourcing decisions depend on antidumping / countervailing duty filings scattered across the Federal Register. I did this analysis by hand in a previous role. |
+| **Built** | Tool-calling agent (Spring Boot + OpenAI) · pgvector retrieval in PostgreSQL · RabbitMQ pipeline with Java and Python consumers · API-key auth · scripted EC2 deployment |
+| **Verified** | At-least-once delivery with idempotent consumers, proven by killing a consumer mid-flight · poison messages dead-lettered · automatic recovery after instance reboot |
+| **Not yet** | Web dashboard, two more data sources, recency weighting. Tracked openly in [KNOWN_ISSUES.md](KNOWN_ISSUES.md) |
 
-An AI agent that replicates, in software, the market-analysis judgment
-I used to do manually in a prior role as a Business Operations
-Analyst at an international
-ingredients distributor: given tariff policy changes, commodity price
-trends, and supply-demand signals, the agent produces sourcing and
-procurement recommendations with a visible reasoning trail.
+## Engineering highlights
 
-This isn't a chat wrapper around an LLM. AI is a core product
-capability here — tool calling, retrieval, and (in progress) memory
-and reasoning traces — built on top of a production-style backend, not
-a demo script.
+1. **Reliable async pipeline, not just "uses a queue."** Ingestion → LLM extraction → embedding runs through RabbitMQ with explicit row status, atomic claims via conditional `UPDATE`, retries with backoff, a dead-letter queue, and a scheduled reconciler for crashed workers. I verified each guarantee with fault injection. → [Ingestion pipeline](#ingestion-pipeline-asynchronous-path)
+2. **Idempotency chosen by cost.** The expensive LLM step claims work before running; the cheap embedding step writes conditionally with no claim. → [ADR-006](#adr-006-choose-idempotency-by-the-cost-of-repeating-a-step)
+3. **A bug that only appeared on one machine.** The stale-work reconciler silently matched nothing because a zone-less `TIMESTAMP` column was written from sessions in different time zones. Fixed with `TIMESTAMPTZ` and the database as the single clock. → [ADR-007](#adr-007-one-clock-for-pipeline-timestamps-timestamptz-written-by-the-database)
+4. **LLM output treated as untrusted input.** Structured extraction returns `null` instead of guessing, and real filings forced handling for code fences, multi-country notices, issuing-vs-affected country confusion and inconsistent names. Every agent answer is stored with its full tool-call trace. → [LLM extraction](#llm-extraction)
+5. **Production basics done properly.** Secrets never in the repo, generated server-side and never printed. Idempotent provisioning script. Rollback-safe JAR swaps. systemd recovery verified with a reboot. → [Deployment](#deployment)
 
-**Why this domain**: I secured a $1M purchase order as a Business
-Operations Analyst using exactly this kind of manual analysis —
-tracking tariff policy and supply-demand signals to advise a client
-on ingredient sourcing. This project rebuilds that judgment process
-as a real system, informed by first-hand understanding of what the
-analysis is actually supposed to accomplish.
+## Example
+
+```text
+$ curl -H "X-API-Key: ..." "http://<host>:8080/api/agent/query?q=glycine%20tariff%20risk"
+
+There are several market events related to glycine tariff risk, particularly concerning
+imports from China, India, Japan, and Thailand:
+
+1. Expedited Five-Year Reviews: The U.S. is reviewing antidumping and countervailing duty
+   orders on glycine imports from China, India, Japan, and Thailand (Published: Sep 18, 2024).
+2. Countervailing Duty Administrative Review (Preliminary Results): The U.S. Department of
+   Commerce has preliminarily determined that countervailable subsidies were provided to
+   producers and exporters of glycine from India (Published: Sep 14, 2026).
+...
+```
+
+The ordering above shows a known gap: results are ranked by similarity only, so a 2024 filing outranks a 2026 one. Recency weighting is the next retrieval change.
+
+## What would change at larger scale
+
+The current design is a single instance on purpose, because the data volume doesn't justify more. The parts that would change first:
+
+- **Consumers scale horizontally as-is.** Claims are atomic conditional updates, so N consumer replicas can share a queue safely. The next step is running them as separate deployments (e.g. Kubernetes) and autoscaling on queue depth.
+- **Dual writes → transactional outbox.** "Write DB, then publish" is currently covered by a scheduled re-publish. At higher volume, an outbox table written in the same transaction removes that gap entirely.
+- **Retrieval:** add an HNSW index on the embedding column and move to managed PostgreSQL with read replicas, so query traffic is isolated from ingestion writes.
+- **Observability:** metrics and alerts on queue depth, DLQ size, LLM latency and error rate, which today are checked by hand.
+
+---
+
+## Why this exists
+
+As a Business Operations Analyst at an international ingredients distributor, I supported a $1M Maltitol Syrup purchase order by manually tracking tariff policy and supply conditions to guide a customer's sourcing decision. That analysis meant reading Federal Register notices, working out which country and product a duty applied to, and judging whether it was still in force.
+
+This project rebuilds that workflow as a system: ingest the filings continuously, extract structured facts from unstructured legal text, and let an LLM answer questions **only from retrieved evidence**, with a trace of which tools it called.
+
+---
 
 ## Architecture
 
 ```
-External data sources (tariff policy, commodity prices, market signals)
-        |
-        v
-Ingestion Pipeline (scheduled jobs -> RabbitMQ queue, async processing)
-        |
-        v
-PostgreSQL + pgvector (structured data + vector embeddings, one database)
-        |
-        v
-AI Agent layer (hand-rolled state machine: tool calling + retrieval +
-                memory + reasoning trace)
-        |
-        v
-Next.js Dashboard (recommendations + explainability view)
+                        ┌──────────────────────── synchronous (user request) ───────────────────────┐
+  Client ──X-API-Key──▶ Spring Boot API ──▶ Agent loop (OpenAI tool calling, ≤ 4 rounds)
+                        │                        │ get_ingredient_info     → ingredients
+                        │                        │ get_market_events       → market_events (structured)
+                        │                        │ search_market_events    → pgvector similarity search
+                        │                        ▼
+                        │                   answer + reasoning trace ──▶ recommendations table
+                        └───────────────────────────────────────────────────────────────────────────┘
+
+                        ┌──────────────────────── asynchronous (background) ─────────────────────────┐
+  @Scheduled job ──▶ Federal Register API ──▶ market_events (PENDING)
+        │                                              │
+        │  publish {eventId}                           │
+        ▼                                              │
+  [events.summarize] ──▶ SummarizeConsumer (Java) ──▶ LLM extraction ──▶ SUMMARIZED
+                                                             │ publish {eventId}
+                                                             ▼
+                         [events.embed] ──▶ EmbedConsumer (Python) ──▶ OpenAI embeddings ──▶ EMBEDDED
+                                                                                (pgvector)
+  failures after retries ──▶ [events.dlq]
+                        └───────────────────────────────────────────────────────────────────────────┘
+
+  Everything runs on one EC2 instance: Spring Boot API, PostgreSQL 16 + pgvector, RabbitMQ, Python consumer
 ```
 
-**Sync vs. async boundary**: real-time user queries ("what's the
-tariff risk on this ingredient right now") are synchronous —
-the agent decides which tools to call and returns a response in the
-same request. Background data ingestion (scheduled scraping of
-tariff/price/news updates) is asynchronous via RabbitMQ, so it never
-blocks the request path and can retry independently on failure.
+**The sync/async boundary is the core design decision.** User queries read only from the database and return in seconds. Fetching, LLM extraction and embedding happen in the background, so a slow or failing external API (Federal Register, OpenAI) never blocks or breaks a user-facing request.
 
-## Current progress (Phase 0)
+---
 
-**Done:**
-- Data layer: `ingredients`, `market_events`, `recommendations` tables
-  — PostgreSQL + JSONB for heterogeneous, category-specific schemas
-  (e.g. collagen tracks solubility/color/taste; plant protein tracks
-  purity only)
-- Real-time ingestion from the **U.S. Federal Register API** — live,
-  not mocked. Country-level relevance filtering (title/abstract text
-  matched against sourcing countries) to surface tariff events
-  relevant to supply-chain risk
-- 22 seeded ingredient records across 4 product categories (sweeteners,
-  plant proteins, collagens, inulin/Jerusalem artichoke), reflecting
-  real sourcing origins (China, Brazil, Sri Lanka, Canada, Finland)
-- `summarize_tariff_event`: LLM-based extraction of tariff rate
-  changes from unstructured policy text — regex alone couldn't handle
-  real-world phrasing like *"initial tariff level of 0 percent,
-  increasing in 18 months...to a rate to be announced"*. Verified
-  against real Federal Register data across three distinct cases:
-  a rate increase with an unresolved future number (correctly
-  extracts what's known, returns `null` for the undecided rate rather
-  than guessing), a multi-country revocation notice (correctly
-  splits into per-country records), and a procedural notice with no
-  tariff data at all (correctly returns all fields `null` instead of
-  hallucinating numbers)
+## How a query works (synchronous path)
 
-**In progress:**
-- Tool-calling layer: `get_ingredient_info`, `get_market_events`
-- End-to-end loop: query → tool calls → generated recommendation
+1. `GET /api/agent/query?q=...` with an `X-API-Key` header (custom Spring Security filter, constant-time comparison).
+2. `AgentOrchestrationService` sends the question to `gpt-4o-mini` with three tool definitions and runs a bounded loop (max 4 rounds): the model chooses tools, the service executes them against PostgreSQL, results go back to the model as `tool` messages.
+3. `search_market_events` embeds the query and runs a pgvector cosine search with a similarity threshold (0.30) and one result per source document (`DISTINCT ON (source_url)`).
+4. The final answer is stored in `recommendations` together with the full tool-call trace (`reasoning_trace` JSONB): which tool, which arguments, in which round.
 
-**Not started yet:** hand-rolled state machine orchestration, memory
-(recommendation-outcome tracking), retrieval quality control
-(similarity thresholding / recency weighting / dedup), frontend.
-See **Future Work** below for what's deliberately out of scope.
+---
+
+## Ingestion pipeline (asynchronous path)
+
+### Status lifecycle
+
+Every `market_events` row carries an explicit status instead of inferring progress from `NULL` columns:
+
+```
+PENDING ──▶ SUMMARIZING ──▶ SUMMARIZED ──▶ EMBEDDED
+                 │
+                 └── stale for > 10 min ──▶ reset to PENDING by the reconciler
+```
+
+### Reliability guarantees
+
+| Concern | Mechanism |
+|---|---|
+| A message is never lost | Durable queues, persistent messages, manual ack **after** the DB commit |
+| Duplicate delivery is harmless (at-least-once) | Consumers check status first; claims use a conditional update (`UPDATE … WHERE id = ? AND status = 'PENDING'`, proceed only if 1 row changed) |
+| Two consumers never process the same row | The same conditional update: row-level locking makes the claim atomic |
+| No duplicate records | Unique index on `(source_url, country)` |
+| Transient failures recover | 3 attempts with exponential backoff (2 s, 4 s), Java and Python consumers |
+| Poison messages don't block the queue | After retries, messages are rejected without requeue and dead-lettered to `events.dlq` |
+| Consumer crashes after claiming a row | Scheduled reconciler resets rows stuck in `SUMMARIZING` |
+| Crash between DB write and the next publish | Scheduled job re-publishes `SUMMARIZED` rows to `events.embed`; the embed write is idempotent |
+
+### Verified with failure drills
+
+- **Poison message:** published a non-JSON payload to `events.summarize` → retried 3×, then dead-lettered with an `x-death` header (`reason: rejected`); the queue kept flowing.
+- **Crash after commit, before ack:** killed the embed consumer with `SIGKILL` between the DB commit and the ack (fault-injection delay) → the broker redelivered the message and the consumer logged `already embedded, skipping`. No duplicate API call, no duplicate write.
+- **Crash after claim:** left a row in `SUMMARIZING` with an old timestamp → the next scheduled run reset it, and it completed end-to-end.
+
+### LLM extraction
+
+`TariffSummarizerService` asks the model for structured JSON (affected country, old/new rate, effective date, one-sentence summary) and to return `null` rather than guess. Real filings required handling:
+- JSON wrapped in markdown code fences
+- one notice covering several countries → one row per country, sharing `source_url`
+- the model naming the issuing country (U.S.) instead of the affected one → explicit prompt instruction
+- inconsistent country names (`People's Republic of China`, `PRC`) → normalization
+- non-ISO dates (`July 29, 2024`) → multi-format parsing
+
+---
+
+## Data (current)
+
+- **Source:** U.S. Federal Register API, filtered to trade-remedy terms (antidumping, countervailing, tariff, duty, Section 301)
+- **100 filings → 122 rows** (one row per affected country) across **11 countries**, mostly from 7 AD/CVD cases (glycine, citric acid, xanthan gum, vanillin, MSG, erythritol, pea protein)
+- **27 ingredient records** across 5 categories, with category-specific specs in JSONB
+
+---
+
+## Deployment
+
+Single AWS EC2 instance (t3.micro, Ubuntu 24.04):
+
+- Spring Boot JAR and the Python consumer run as **systemd** services (`Restart=on-failure` / `always`); both recover automatically after an instance reboot (verified).
+- **Security Groups:** SSH restricted to a single client IP; RabbitMQ and PostgreSQL are not exposed publicly; the RabbitMQ management UI is not installed on the server.
+- **Secrets** live in `EnvironmentFile`s (`chmod 600`), never in the repository. The RabbitMQ password is generated on the server and never printed; the default `guest` user is removed.
+- **Provisioning is scripted:** [`deploy/setup_pipeline.sh`](deploy/setup_pipeline.sh) is idempotent: install, migrate, configure, restart, verify.
+- **Deploys** upload `app.jar.new`, then stop → keep `app.jar.bak` for rollback → swap → start.
+
+---
 
 ## Architecture Decision Records
 
 ### ADR-001: PostgreSQL + pgvector instead of a separate vector database
-
-**Context**: The agent needs both structured queries (ingredient
-specs, price history) and semantic search over market event text.
-
-**Decision**: Store both in PostgreSQL using the `pgvector` extension,
-rather than running a dedicated vector database alongside it.
-
-**Consequences**: One database to operate instead of two — lower
-operational complexity for a solo project, and structured/vector
-queries can be joined in the same SQL statement. Trade-off: less
-specialized vector-search tooling than a dedicated vector DB would
-offer, which is an acceptable cost at this project's scale.
+**Context:** The agent needs structured queries (ingredients, filings by country) and semantic search over filing text.
+**Decision:** Keep both in PostgreSQL with the `pgvector` extension.
+**Consequences:** One database to run, back up and secure; structured and vector predicates can be combined in a single SQL statement. Trade-off: fewer specialized vector-search features than a dedicated vector store, which is acceptable at this scale.
 
 ### ADR-002: RabbitMQ instead of Kafka
+**Context:** Background ingestion must not block the request path and must retry independently.
+**Decision:** RabbitMQ with a direct exchange (`market.events`), one queue per stage, and a dead-letter exchange.
+**Consequences:** The workload is task-oriented (process each filing once, then ack), not a replayable high-throughput event log, which is exactly RabbitMQ's model. Per-message ack, retries and dead-lettering come built in. Kafka's partitions, offsets and retention would add operational weight this workload doesn't use.
 
-**Context**: Background data ingestion (scheduled pulls from
-external APIs) needs to run asynchronously so it never blocks the
-request path.
+### ADR-003: Spring Boot core, Python for embeddings, and the queue as the language boundary
+**Context:** The core backend needs Spring's reliability tooling; embedding generation is a narrow job.
+**Decision:** Java owns the API, orchestration, summarization consumer and the queue definitions; a small Python consumer owns embedding. They share only a JSON message contract (`{"eventId": N}`) and the database.
+**Consequences:** Messages carry IDs, not payloads, so the database stays the source of truth and consumers always read the latest state. The Python consumer doesn't declare queues (re-declaring with different arguments fails with `PRECONDITION_FAILED`), so queue configuration has a single owner.
 
-**Decision**: Use RabbitMQ for the ingestion queue.
+### ADR-004: A bounded tool-calling loop instead of an agent framework
+**Context:** The agent coordinates tool calls and answer generation over several steps.
+**Decision:** Implement the loop directly against the OpenAI Chat Completions API (max 4 rounds), not LangChain/LangGraph.
+**Consequences:** Every step is visible and logged: messages, tool calls, arguments, results. The trace is persisted, and the round limit bounds cost and latency. The trade-off is writing plumbing a framework would provide; at three tools that's a small cost for full control. If the flow grows into fixed multi-stage plans, an explicit state machine is the next step.
 
-**Consequences**: This is a scheduled, task-oriented workload (fetch
-a few sources, process, store) — not a high-throughput,
-multi-consumer streaming workload. RabbitMQ's queue model fits that
-shape directly and has a lower operational/learning cost for a solo
-build than Kafka would. Kafka would add complexity this workload
-doesn't need.
+### ADR-005: LLM structured extraction instead of regex for tariff parsing
+**Context:** The original regex (`\d+\s*percent`) failed on real filings that phrase rate changes as multi-clause sentences with unresolved future values.
+**Decision:** Extract structured JSON with an LLM, instructed to return `null` rather than guess.
+**Consequences:** Handles ambiguous legal phrasing and multi-country notices, at the cost of an API call per filing and non-determinism, which the asynchronous pipeline absorbs. Regex-extracted columns are kept for a planned before/after accuracy comparison.
 
-### ADR-003: Deliberate polyglot — Spring Boot core, Python for data processing
+### ADR-006: Choose idempotency by the cost of repeating a step
+**Context:** At-least-once delivery means every consumer will occasionally see the same message twice.
+**Decision:** The summarize step **claims first** (`PENDING → SUMMARIZING` via conditional update) because an LLM call is expensive. The embed step **writes conditionally** (`… WHERE status = 'SUMMARIZED'`) with no separate claim, because a duplicate embedding call costs fractions of a cent.
+**Consequences:** The expensive step can't run twice concurrently; the cheap step stays simple. Claims introduce a "stuck claim" failure mode, which is covered by the reconciler.
 
-**Context**: The core backend (REST API, auth, caching, retry,
-orchestration) needs production-grade reliability; the data
-processing / embedding-generation layer benefits from a mature
-ecosystem of tooling.
+### ADR-007: One clock for pipeline timestamps (`TIMESTAMPTZ`, written by the database)
+**Context:** The reconciler compares `status_updated_at` with "10 minutes ago". With a zone-less `TIMESTAMP` column, values written from sessions in different time zones (JVM vs. `psql`) were hours apart for the same instant, and the reconciler silently matched nothing.
+**Decision:** Store `TIMESTAMPTZ`; only the database writes the column (`now()`; the entity field is `insertable = false, updatable = false`); the staleness threshold is computed in SQL.
+**Consequences:** Comparisons are between absolute instants from a single clock, independent of server, JVM or session time zones. The bug only showed up on a machine whose zones differed, which is why it's recorded here.
 
-**Decision**: Keep the core backend in Java/Spring Boot; use Python
-only for a narrow, isolated embedding-generation script that reads
-text from Postgres, calls an embedding API, and writes back to
-`pgvector`.
+---
 
-**Consequences**: This isn't a language-loyalty choice — it's
-choosing where to go deep versus where to use the strongest tool
-for a narrow job. Spring Boot depth is reused directly from prior
-backend reliability work; Python is scoped tightly enough that it
-doesn't dilute that depth.
+## Roadmap
 
-### ADR-004: Hand-rolled state machine instead of LangGraph
+Not built yet (tracked in [KNOWN_ISSUES.md](KNOWN_ISSUES.md)):
 
-**Context**: Agent orchestration needs to coordinate tool calls,
-retrieval, and recommendation generation across multiple steps.
+- [ ] **Recency weighting** in retrieval (concluded reviews can currently rank above recent ones)
+- [ ] **Source links** in answers
+- [ ] **Two more data sources** (only the Federal Register today)
+- [ ] **Next.js + TypeScript dashboard**: query view with reasoning trace, pipeline status view
+- [ ] Additional agent tools: tariff summarization on demand, similar-customer lookup
+- [ ] Evaluation set for retrieval threshold and answer groundedness
+- [ ] Unit tests (pure functions and the auth filter first)
 
-**Decision**: Implement a simplified state machine by hand rather
-than using LangGraph.
+**Deliberately out of scope:** streaming responses, fine-tuning, multi-agent setups, Kubernetes/microservices. None of them are warranted at this scale.
 
-**Consequences**: This project's information-processing flow has a
-dependency structure that can be defined upfront (parse intent →
-fetch ingredient data → fetch market events → generate
-recommendation), which fits a graph/state-machine pattern — favoring
-controllability, replayability, and clear failure paths — better
-than an open-ended agent loop would. Implementing it by hand (rather
-than depending on a library) also means being able to explain the
-orchestration's actual mechanics, not just that a framework was
-used.
+---
 
-### ADR-005: LLM-based extraction over regex for tariff rate parsing
+## Running locally
 
-**Context**: `MarketEventFetcher` originally used a regex
-(`\d+\s*percent`) to pull tariff rates out of Federal Register
-abstracts. Real data broke this quickly — announcements routinely
-phrase rate changes as multi-clause sentences with unresolved future
-values (e.g. a rate that "increases in 18 months to a rate to be
-announced"), which no fixed pattern can parse correctly.
+Prerequisites: Java 17, PostgreSQL 16 with `pgvector`, RabbitMQ (`brew install rabbitmq`), Python 3.12, an OpenAI API key.
 
-**Decision**: Extract tariff rate changes via an LLM call
-(`summarize_tariff_event`) instead, prompted to return a structured
-JSON object (country, old/new rate, effective date, one-line summary)
-and to return `null` rather than guess when a value isn't stated in
-the source text.
+```bash
+# 1. Database: create market_intelligence, enable pgvector, then apply db/ migrations
 
-**Consequences**: This required handling two real-world quirks the
-regex version never had to deal with: (1) the model sometimes wraps
-JSON output in a markdown code fence even when explicitly told not
-to — handled by stripping the fence before parsing; (2) a single
-policy announcement can reference multiple countries (e.g. a
-revocation notice naming both India and China) — handled by
-splitting the LLM's country field and writing one `market_events`
-row per country, sharing the same `source_url` so it's traceable
-back to a single source document. The regex-vs-LLM extraction
-success rate on real Federal Register data is being tracked as a
-concrete before/after comparison (see project notes).
+# 2. Config (gitignored): src/main/resources/application-local.properties
+#    spring.datasource.url / username / password, openai.api.key, app.api-key
 
-## Future Work (explicitly out of scope for now)
+# 3. API + summarize consumer
+./mvnw spring-boot:run -Dspring-boot.run.profiles=local
 
-- **Streaming responses (SSE/WebSocket)** — would require frontend
-  complexity (stream rendering, reconnect handling) this project
-  deliberately isn't investing in; backend depth is the priority
-- **Fine-tuning** — this project's focus is backend + AI system
-  integration, not ML research; fine-tuning without a proper
-  evaluation framework would add risk without real signal
-- **Multi-agent architectures, full LangChain stack** — a single,
-  explainable agent workflow is a better fit for this project's
-  reliability-focused narrative than stacking multiple loosely
-  defined agents
-- **Kubernetes, microservices, Terraform/CI-CD pipelines** — not
-  warranted at this project's scale
-- **Manufacturer-level spec comparison system** — a real part of the
-  underlying business problem, deliberately left undesigned here to
-  keep scope bounded; happy to discuss the design in an interview
+# 4. Embed consumer (embedding-script/.env: OPENAI_API_KEY, DB_NAME, DB_USER)
+cd embedding-script && python -m venv .venv && source .venv/bin/activate
+pip install pika psycopg2-binary requests python-dotenv
+python embed_consumer.py
+
+# 5. Trigger one ingestion run (local profile only), then query
+curl http://localhost:8080/test/run-ingestion
+curl -H "X-API-Key: <your local key>" "http://localhost:8080/api/agent/query?q=glycine%20tariff%20risk"
+```
+
+In production the ingestion job runs on a schedule (weekdays 9:00 America/New_York) when `APP_INGESTION_ENABLED=true`.
+
+---
+
+## Repository layout
+
+```
+src/main/java/.../
+  AgentController, AgentOrchestrationService, AgentToolService   # synchronous agent path
+  EmbeddingService                                               # query embeddings for retrieval
+  IngestionJob, MarketEventFetcher                               # scheduled producer + reconciler
+  RabbitConfig, EventPublisher, SummarizeConsumer, EventStatus   # async pipeline
+  TariffSummarizerService                                        # LLM structured extraction
+  SecurityConfig, ApiKeyFilter                                   # API-key auth
+embedding-script/embed_consumer.py    # Python embed consumer
+db/                                   # SQL migrations
+deploy/setup_pipeline.sh              # idempotent EC2 provisioning
+KNOWN_ISSUES.md                       # known limitations and changelog
+```
 
 ## Tech stack
 
-Spring Boot (Java 17) · PostgreSQL + pgvector · OpenAI API
-(`gpt-4o-mini`, tariff extraction) · RabbitMQ · Redis · Spring
-Security · Python (embedding generation) · Next.js + TypeScript
-(planned) · AWS EC2 (planned)
+Java 17 · Spring Boot 4 · Spring Security · Spring AMQP · Hibernate 7 · PostgreSQL 16 + pgvector · RabbitMQ · Python (pika, psycopg2) · OpenAI API (`gpt-4o-mini`, `text-embedding-3-small`) · AWS EC2 · systemd
