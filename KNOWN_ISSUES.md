@@ -12,7 +12,7 @@
 
 | ID | Issue | Why it's next | Est. effort |
 |----|-------|---------------|-------------|
-| F1 | No web dashboard | Next.js + TypeScript UI for queries, reasoning traces and pipeline status | 1–2 days |
+| D1 | API served over plain HTTP; the Vercel → EC2 hop carries the API key unencrypted | Highest remaining security gap now that the dashboard is public | 2–3 h |
 | T1 | No unit tests | Safety net for ranking, extraction parsing and auth | 2–3 h |
 
 ---
@@ -28,6 +28,7 @@
 | D9 | ⚪ | `pg_restore` reports `must be owner of extension vector` on the `COMMENT` step | Harmless; data restores fully | Won't fix |
 | D10 | 🟡 | Hibernate `show-sql` is on; `DataSeeder` prints every ingredient to stdout | Noisy logs, including in journald on EC2 | Disable `show-sql` outside the `local` profile; switch prints to debug-level logging |
 | D11 | 🟡 | Memory headroom on the 1 GB t3.micro is thin (~217 MiB available with JVM, Postgres, RabbitMQ and the Python consumer running) | Swap configured; RabbitMQ management plugin intentionally not installed | Monitor; move to t3.small or managed services (RDS / Amazon MQ) before adding components |
+| D12 | 🟡 | The dashboard's rate limiter is in-memory, i.e. per serverless instance | A determined client could exceed 10 questions / 10 min by hitting different instances | Shared store (Redis / Vercel KV) or an OpenAI monthly spend cap as a backstop |
 
 ## 2. Data Pipeline
 
@@ -81,6 +82,8 @@
 
 | Date | Issue | Fix |
 |------|-------|-----|
+| 2026-10-23 | **F1** — No web dashboard | Next.js 15 + TypeScript dashboard on Vercel: BFF route handler + Server Component (API key server-only), reasoning trail, data-sources page, ingestion run history |
+| 2026-10-23 | First Vercel deploy blocked: pinned Next.js 15.5.4 had CVE-2025-66478 (RCE) | Upgraded to patched 15.5.x; `npm audit` then flagged postcss and sharp, assessed as not reachable here and fixed via `overrides` instead of a major-version jump |
 | 2026-10-23 | **P1** — Only Federal Register as a source | Added Regulations.gov (USTR Section 301 notices, title enriched with FR abstract, cross-source dedup by FR document number) as source 3. Verified: 16 documents ingested, LLM-extracted countries, second run fetched 0 (dedup) |
 | 2026-10-23 | A failing tool (e.g. a DB permission error) turned the whole agent request into HTTP 500 | Tool calls are wrapped; errors go back to the model as a tool result so it can say the data is unavailable instead of guessing |
 | 2026-10-23 | Production migration created `tariff_rates` owned by `postgres` (run via `sudo -u postgres`), so the app got `permission denied`; per-line error isolation kept the job running | Ownership reassigned to the app user; migration header documents running as the app user |

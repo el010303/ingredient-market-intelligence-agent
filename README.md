@@ -2,10 +2,12 @@
 
 An LLM agent that answers ingredient-sourcing questions ("what's the tariff risk on glycine from India?") using only evidence retrieved from three official U.S. trade-policy sources. It's backed by an asynchronous, failure-tested ingestion pipeline and deployed on AWS EC2.
 
+**Live demo:** [market-intel-agent-bice.vercel.app](https://market-intel-agent-bice.vercel.app): ask a question and see the full tool-call trail, or browse the [data sources](https://market-intel-agent-bice.vercel.app/pipeline).
+
 - **Problem:** Sourcing decisions depend on duties set by three different agencies: AD/CVD filings (Commerce, Federal Register), Section 301 actions (USTR) and base tariff rates (USITC). I did this analysis by hand in a previous role.
-- **Built:** Tool-calling agent (Spring Boot + OpenAI) · ingestion from 3 external sources · pgvector retrieval in PostgreSQL · RabbitMQ pipeline with Java and Python consumers · API-key auth · scripted EC2 deployment
+- **Built:** Tool-calling agent (Spring Boot + OpenAI) · Next.js + TypeScript dashboard · ingestion from 3 external sources · pgvector retrieval in PostgreSQL · RabbitMQ pipeline with Java and Python consumers · API-key auth · scripted EC2 deployment
 - **Verified:** At-least-once delivery with idempotent consumers, proven by killing a consumer mid-flight · poison messages dead-lettered · automatic recovery after instance reboot
-- **Not yet:** Web dashboard. Tracked openly in [KNOWN_ISSUES.md](KNOWN_ISSUES.md)
+- **Not yet:** HTTPS between the dashboard and the API, an evaluation set, unit tests. Tracked openly in [KNOWN_ISSUES.md](KNOWN_ISSUES.md)
 
 ## Engineering highlights
 
@@ -14,7 +16,8 @@ An LLM agent that answers ingredient-sourcing questions ("what's the tariff risk
 3. **A bug that only appeared on one machine.** The stale-work reconciler silently matched nothing because a zone-less `TIMESTAMP` column was written from sessions in different time zones. Fixed with `TIMESTAMPTZ` and the database as the single clock. → [ADR-007](#adr-007-one-clock-for-pipeline-timestamps-timestamptz-written-by-the-database)
 4. **LLM output treated as untrusted input.** Structured extraction returns `null` instead of guessing, and real filings forced handling for code fences, multi-country notices, issuing-vs-affected country confusion and inconsistent names. Every agent answer is stored with its full tool-call trace. → [LLM extraction](#llm-extraction)
 5. **Three sources, each handled the way its data deserves.** Unstructured legal text (Federal Register, Regulations.gov) goes through LLM extraction; the structured USITC tariff API skips the LLM entirely and is diffed against a snapshot to emit change events. Documents published in both Regulations.gov and the Federal Register are deduplicated by FR document number. → [Data sources](#data-sources)
-6. **Production basics done properly.** Secrets never in the repo, generated server-side and never printed. Idempotent provisioning script. Rollback-safe JAR swaps. systemd recovery verified with a reboot. → [Deployment](#deployment)
+6. **The API key never reaches the browser.** The Next.js dashboard is a backend-for-frontend: the interactive page calls its own route handler, which adds the key server-side; the status page is a Server Component. The key module is marked `server-only`, so importing it from browser code fails the build. → [Dashboard](#dashboard)
+7. **Production basics done properly.** Secrets never in the repo, generated server-side and never printed. Idempotent provisioning script. Rollback-safe JAR swaps. systemd recovery verified with a reboot. → [Deployment](#deployment)
 
 ## Example
 
@@ -69,7 +72,7 @@ This project rebuilds that workflow as a system: ingest the filings continuously
 flowchart TB
     subgraph sync["Request path (synchronous)"]
         direction LR
-        C[Client] -- "X-API-Key" --> A["Spring Boot API<br/>tool-calling agent"]
+        B[Browser] -- "HTTPS, no key" --> V["Next.js on Vercel<br/>backend-for-frontend"] -- "X-API-Key" --> A["Spring Boot API<br/>tool-calling agent"]
     end
 
     subgraph async["Ingestion path (asynchronous, RabbitMQ)"]
@@ -83,7 +86,7 @@ flowchart TB
     async -- "status, summaries, vectors" --> DB
 ```
 
-All components run on one EC2 instance: Spring Boot API, PostgreSQL 16 + pgvector, RabbitMQ, and the Python consumer.
+The dashboard runs on Vercel; everything else runs on one EC2 instance: Spring Boot API, PostgreSQL 16 + pgvector, RabbitMQ, and the Python consumer.
 
 **The sync/async boundary is the core design decision.** User queries read only from the database and return in seconds. Fetching, LLM extraction and embedding happen in the background, so a slow or failing external API (any of the three sources, or OpenAI) never blocks or breaks a user-facing request.
 
@@ -161,6 +164,19 @@ Sources that were evaluated and rejected: USITC news releases (HTTP 403 for non-
 
 ---
 
+## Dashboard
+
+Next.js 15 (App Router) + TypeScript in [`frontend/`](frontend), deployed on Vercel.
+
+| Page | Rendering | What it shows |
+|---|---|---|
+| **Ask** (`/`) | Client Component → `/api/query` route handler → Spring Boot | The answer with every duty figure highlighted and linked to its source, plus "How this answer was built": each round of tool calls in plain language, the source it read, the arguments, and a preview of the data returned |
+| **Data sources** (`/pipeline`) | Server Component, rendered on the server | Documents per source and agency, base tariff per ingredient, recent ingestion runs (from `ingestion_runs`) |
+
+- **Secrets stay server-side.** `BACKEND_API_KEY` is read only in `lib/backend.ts`, which imports `server-only`; the build output marks both key-using routes as server-rendered (`ƒ`) and the ask page as static (`○`).
+- **Cost guard.** Each question triggers paid LLM calls, so the proxy validates input length and rate-limits per client (10 questions per 10 minutes). The limiter is in-memory, so on serverless it is per instance; a shared store (e.g. Redis) would be needed for a hard guarantee. See [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
+- **Dependencies are pinned and audited.** The first deploy was blocked by Vercel for a vulnerable Next.js version (CVE-2025-66478); upgraded to a patched 15.5.x and overrode two vulnerable transitive packages instead of jumping a major version.
+
 ## Deployment
 
 Single AWS EC2 instance (t3.micro, Ubuntu 24.04):
@@ -170,6 +186,7 @@ Single AWS EC2 instance (t3.micro, Ubuntu 24.04):
 - **Secrets** live in `EnvironmentFile`s (`chmod 600`), never in the repository. The RabbitMQ password is generated on the server and never printed; the default `guest` user is removed.
 - **Provisioning is scripted:** [`deploy/setup_pipeline.sh`](deploy/setup_pipeline.sh) is idempotent: install, migrate, configure, restart, verify.
 - **Deploys** upload `app.jar.new`, then stop → keep `app.jar.bak` for rollback → swap → start.
+- **Dashboard** deploys automatically from `main` on Vercel (root directory `frontend`); `BACKEND_URL` and `BACKEND_API_KEY` are Vercel environment variables, the key marked sensitive.
 
 ---
 
@@ -216,7 +233,8 @@ Single AWS EC2 instance (t3.micro, Ubuntu 24.04):
 
 Not built yet (tracked in [KNOWN_ISSUES.md](KNOWN_ISSUES.md)):
 
-- [ ] **Next.js + TypeScript dashboard**: query view with reasoning trace, pipeline status view
+- [ ] **HTTPS on the API** (the Vercel → EC2 hop is plain HTTP today)
+- [ ] Shared rate limiter for the dashboard proxy
 - [ ] Evaluation set for retrieval threshold and answer groundedness
 - [ ] Unit tests (pure functions and the auth filter first)
 
@@ -245,6 +263,9 @@ python embed_consumer.py
 # 5. Trigger one ingestion run (local profile only), then query
 curl http://localhost:8080/test/run-ingestion
 curl -H "X-API-Key: <your local key>" "http://localhost:8080/api/agent/query?q=glycine%20tariff%20risk"
+
+# 6. Dashboard (frontend/.env.local: BACKEND_URL, BACKEND_API_KEY; see .env.local.example)
+cd frontend && npm install && npm run dev    # http://localhost:3000
 ```
 
 In production the ingestion job runs on a schedule (weekdays 9:00 America/New_York) when `APP_INGESTION_ENABLED=true`.
@@ -261,7 +282,10 @@ src/main/java/.../
   RabbitConfig, EventPublisher, SummarizeConsumer, EventStatus   # async pipeline
   TariffSummarizerService                                        # LLM structured extraction
   SecurityConfig, ApiKeyFilter                                   # API-key auth
+  HtsRateFetcher, RegulationsGovFetcher                          # data sources 2 and 3
+  PipelineStatusController, AdminController                      # status page data, manual ingestion trigger
 embedding-script/embed_consumer.py    # Python embed consumer
+frontend/                             # Next.js + TypeScript dashboard (BFF)
 db/                                   # SQL migrations
 deploy/setup_pipeline.sh              # idempotent EC2 provisioning
 KNOWN_ISSUES.md                       # known limitations and changelog
@@ -269,4 +293,4 @@ KNOWN_ISSUES.md                       # known limitations and changelog
 
 ## Tech stack
 
-Java 17 · Spring Boot 4 · Spring Security · Spring AMQP · Hibernate 7 · PostgreSQL 16 + pgvector · RabbitMQ · Python (pika, psycopg2) · OpenAI API (`gpt-4o-mini`, `text-embedding-3-small`) · AWS EC2 · systemd
+Java 17 · Spring Boot 4 · Spring Security · Spring AMQP · Hibernate 7 · PostgreSQL 16 + pgvector · RabbitMQ · Python (pika, psycopg2) · OpenAI API (`gpt-4o-mini`, `text-embedding-3-small`) · Next.js 15 + TypeScript · AWS EC2 · Vercel · systemd
