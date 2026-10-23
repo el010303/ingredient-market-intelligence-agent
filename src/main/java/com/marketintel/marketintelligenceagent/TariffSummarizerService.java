@@ -8,11 +8,12 @@ import org.springframework.http.*;
 import org.springframework.web.client.RestTemplate;
 
 import java.time.LocalDate;
+import java.util.ArrayList;
 import java.util.List;
 
 @Service
 public class TariffSummarizerService {
-    
+
     @Value("${openai.api.key}")
     private String openaiApiKey;
 
@@ -44,89 +45,100 @@ public class TariffSummarizerService {
                 "temperature": 0
                 }
                 """.formatted(jsonMapper.valueToTree(prompt).toString());
-        
+
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
         headers.setBearerAuth(openaiApiKey);
 
         HttpEntity<String> request = new HttpEntity<>(requestBody, headers);
         ResponseEntity<String> response = restTemplate.postForEntity(url, request, String.class);
-        
-        
+
         JsonNode root = jsonMapper.readTree(response.getBody());
         return root.path("choices").get(0).path("message").path("content").asText();
     }
 
-    // Summary + analyst + separate country
-    public void summarizeAndStore(Long eventId) {
-    MarketEvent original = marketEventRepository.findById(eventId).orElseThrow();
+    /**
+     * Summarizes one filing with the LLM and stores the result.
+     * A multi-country filing is split into one row per country.
+     *
+     * @return ids of every row written (the original row first), so the caller
+     *         can queue each of them for embedding
+     */
+    public List<Long> summarizeAndStore(Long eventId) {
+        MarketEvent original = marketEventRepository.findById(eventId).orElseThrow();
+        List<Long> savedIds = new ArrayList<>();
 
-    String input = original.getRawText() != null ? original.getRawText() : original.getTitle();
-    String llmResultJson = stripMarkdownCodeBlock(summarize(input));
-    JsonNode result = jsonMapper.readTree(llmResultJson);
+        String input = original.getRawText() != null ? original.getRawText() : original.getTitle();
+        String llmResultJson = stripMarkdownCodeBlock(summarize(input));
+        JsonNode result = jsonMapper.readTree(llmResultJson);
 
-    // 统一成"每个国家一条"的列表：数组时每个元素一条；单个对象时按国家字符串拆分
-    List<JsonNode> items = new java.util.ArrayList<>();
-    List<String> countries = new java.util.ArrayList<>();
-    if (result.isArray()) {
-        for (JsonNode item : result) {
-            items.add(item);
-            countries.add(normalizeCountry(item.path("country").asText("")));
-        }
-    } else {
-        for (String c : result.path("country").asText("").split("\\s+and\\s+|,\\s*")) {
-            if (!c.isBlank()) {
-                items.add(result);
-                countries.add(normalizeCountry(c));
+        // 统一成"每个国家一条"的列表：数组时每个元素一条；单个对象时按国家字符串拆分
+        List<JsonNode> items = new ArrayList<>();
+        List<String> countries = new ArrayList<>();
+        if (result.isArray()) {
+            for (JsonNode item : result) {
+                items.add(item);
+                countries.add(normalizeCountry(item.path("country").asText("")));
             }
-        }
-    }
-
-    if (items.isEmpty()) {
-        items.add(result);
-        countries.add(original.getCountry());
-    }
-
-    for (int i = 0; i < items.size(); i++) {
-        JsonNode item = items.get(i);
-        String country = countries.get(i);
-        if (country == null || country.isBlank()) {
-            if (i == 0) {
-                country = original.getCountry();
-            } else {
-            continue;                      
-            }
-        }
-    final String finalCountry = country;
-
-        MarketEvent target;
-        if (i == 0) {
-            target = original;
         } else {
-            boolean exists = marketEventRepository.findAll().stream()
-                    .anyMatch(e -> finalCountry.equals(e.getCountry())
-                            && original.getSourceUrl().equals(e.getSourceUrl()));
-            if (exists) continue;
-            target = new MarketEvent();
-            target.setEventType(original.getEventType());
-            target.setTitle(original.getTitle());
-            target.setRawText(original.getRawText());
-            target.setSourceUrl(original.getSourceUrl());
-            target.setEventDate(original.getEventDate());
+            for (String c : result.path("country").asText("").split("\\s+and\\s+|,\\s*")) {
+                if (!c.isBlank()) {
+                    items.add(result);
+                    countries.add(normalizeCountry(c));
+                }
+            }
         }
 
-        target.setCountry(country);
-        target.setExtractOldRate(item.path("old_rate").isNumber() ? item.path("old_rate").asDouble() : null);
-        target.setExtractNewRate(item.path("new_rate").isNumber() ? item.path("new_rate").asDouble() : null);
-        target.setEffectiveDate(parseDate(item.path("effective_date").asText(null)));
-        String summary = item.path("summary").asText(null);
-        if ((summary == null || summary.isBlank()) && i == 0) {
-            summary = "[no summary extracted]"; 
+        if (items.isEmpty()) {
+            items.add(result);
+            countries.add(original.getCountry());
         }
-        target.setLlmSummary(summary);
-        marketEventRepository.save(target);
+
+        for (int i = 0; i < items.size(); i++) {
+            JsonNode item = items.get(i);
+            String country = countries.get(i);
+            if (country == null || country.isBlank()) {
+                if (i == 0) {
+                    country = original.getCountry();   // 保底：原始行一定要写入，避免反复重试
+                } else {
+                    continue;                          // 拆出来的新行没有国家就没有意义
+                }
+            }
+            final String finalCountry = country;
+
+            MarketEvent target;
+            if (i == 0) {
+                target = original;
+            } else {
+                boolean exists = marketEventRepository.findAll().stream()
+                        .anyMatch(e -> finalCountry.equals(e.getCountry())
+                                && original.getSourceUrl().equals(e.getSourceUrl()));
+                if (exists) continue;
+                target = new MarketEvent();
+                target.setEventType(original.getEventType());
+                target.setTitle(original.getTitle());
+                target.setRawText(original.getRawText());
+                target.setSourceUrl(original.getSourceUrl());
+                target.setEventDate(original.getEventDate());
+                target.setStatus(EventStatus.SUMMARIZED);
+            }
+
+            target.setCountry(country);
+            target.setExtractOldRate(item.path("old_rate").isNumber() ? item.path("old_rate").asDouble() : null);
+            target.setExtractNewRate(item.path("new_rate").isNumber() ? item.path("new_rate").asDouble() : null);
+            target.setEffectiveDate(parseDate(item.path("effective_date").asText(null)));
+
+            String summary = item.path("summary").asText(null);
+            if ((summary == null || summary.isBlank()) && i == 0) {
+                summary = "[no summary extracted]"; 
+            }
+            target.setLlmSummary(summary);
+
+            MarketEvent saved = marketEventRepository.save(target);
+            savedIds.add(saved.getId());
+        }
+        return savedIds;
     }
-}
 
     private String normalizeCountry(String c) {
         String s = c.trim().replaceFirst("(?i)^the\\s+", "");
@@ -136,6 +148,7 @@ public class TariffSummarizerService {
         return s;
     }
 
+    // Legacy synchronous path (local test endpoint). The RabbitMQ consumer replaces this.
     public void summarizePending() {
         List<Long> ids = marketEventRepository.findAll().stream()
                 .filter(e -> e.getLlmSummary() == null)
@@ -148,7 +161,7 @@ public class TariffSummarizerService {
             } catch (Exception e) {
                 System.out.println("Summarize failed for id=" + id + ": " + e.getMessage());
             }
-            }
+        }
     }
 
     private LocalDate parseDate(String dateStr) {
@@ -171,9 +184,7 @@ public class TariffSummarizerService {
     private String stripMarkdownCodeBlock(String text) {
         String trimmed = text.trim();
         if (trimmed.startsWith("```")) {
-
             trimmed = trimmed.replaceFirst("^```[a-zA-Z]*\\s*", "");
-
             trimmed = trimmed.replaceFirst("```\\s*$", "");
         }
         return trimmed;

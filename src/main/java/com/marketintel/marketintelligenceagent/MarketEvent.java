@@ -24,6 +24,15 @@ public class MarketEvent {
     @Column(columnDefinition = "TEXT")
     private String llmSummary;
 
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false, length = 20)
+    private EventStatus status = EventStatus.PENDING;
+
+    // Written only by the database (column DEFAULT now() on insert, now() in status UPDATEs),
+    // so every timestamp in this column comes from one clock.
+    @Column(insertable = false, updatable = false)
+    private java.time.LocalDateTime statusUpdatedAt;
+
     private String sourceUrl;
     private LocalDate eventDate;
     private Double oldRate;
@@ -60,4 +69,9 @@ public class MarketEvent {
     public void setExtractNewRate(Double extractNewRate) { this.extractNewRate = extractNewRate; }
     public LocalDate getEffectiveDate() { return effectiveDate; }
     public void setEffectiveDate(LocalDate effectiveDate) { this.effectiveDate = effectiveDate; }
+    public EventStatus getStatus() { return status; }
+    public void setStatus(EventStatus status) { this.status = status; }
+
+    public java.time.LocalDateTime getStatusUpdatedAt() { return statusUpdatedAt; }
+    public void setStatusUpdatedAt(java.time.LocalDateTime statusUpdatedAt) { this.statusUpdatedAt = statusUpdatedAt; }
 }

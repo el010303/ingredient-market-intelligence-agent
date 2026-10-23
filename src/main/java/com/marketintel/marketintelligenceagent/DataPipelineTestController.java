@@ -1,35 +1,25 @@
 package com.marketintel.marketintelligenceagent;
 
+import org.springframework.context.annotation.Profile;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RestController;
-import java.util.List;
-import org.springframework.context.annotation.Profile;
 
+/**
+ * Local-only entry point for triggering the ingestion pipeline by hand.
+ * In production the same job runs on a schedule (IngestionJob.scheduledRun).
+ */
 @Profile("local")
 @RestController
 public class DataPipelineTestController {
 
-    private final MarketEventFetcher marketEventFetcher;
-    private final TariffSummarizerService tariffSummarizerService;
+    private final IngestionJob ingestionJob;
 
-    public DataPipelineTestController(MarketEventFetcher marketEventFetcher,
-                                       TariffSummarizerService tariffSummarizerService) {
-        this.marketEventFetcher = marketEventFetcher;
-        this.tariffSummarizerService = tariffSummarizerService;
+    public DataPipelineTestController(IngestionJob ingestionJob) {
+        this.ingestionJob = ingestionJob;
     }
 
-    @GetMapping("/test/fetch-keywords")
-    public String fetchKeywords() {
-        List<String> keywords = List.of("sucralose", "citric acid", "xanthan gum",
-            "glycine", "vanillin", "monosodium glutamate", "ascorbic acid",
-            "collagen", "gelatin", "stevia", "sorbitol", "pea protein");
-        int saved = marketEventFetcher.fetchByKeywords(keywords, 20);
-        return "Saved " + saved + " new events";
-    }
-
-    @GetMapping("/test/summarize-pending")
-    public String summarizePending() {
-        tariffSummarizerService.summarizePending();
-        return "Done";
+    @GetMapping("/test/run-ingestion")
+    public String runIngestion() {
+        return ingestionJob.runOnce();
     }
 }

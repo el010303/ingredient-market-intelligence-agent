@@ -1,6 +1,6 @@
 # Known Issues & Limitations
 
-> Last updated: 2026-10-20
+> Last updated: 2026-10-22
 >
 > This file tracks issues that are **known but not yet fixed**. When an issue is resolved, it moves to the [Changelog](#changelog) at the bottom with a note on how it was fixed.
 >
@@ -12,7 +12,7 @@
 
 | ID | Issue | Why it's next | Est. effort |
 |----|-------|---------------|-------------|
-| P5 | Summarization and embedding are triggered manually | Being replaced by an async RabbitMQ pipeline (in progress) | Module |
+| M1 | Pipeline not yet deployed to EC2 | RabbitMQ + Python consumer need provisioning and systemd units | 2–3 h |
 | R1 | No recency weighting in retrieval | Older, concluded reviews can be described as "ongoing"; in a glycine query, a 2026 filing ranked below a 2024 one | 1–2 h |
 | R7 | Answers don't cite source links | Users can't verify claims against the original filing | 30 min |
 | T1 | No unit tests | Needed as a safety net before the pipeline refactor | 2–3 h |
@@ -38,7 +38,6 @@
 | P2 | 🟡 | USITC HTS data explored but not integrated | — | Deferred |
 | P3 | 🟡 | Data is concentrated in 7 AD/CVD cases, mostly China-origin | 100 filings → 122 rows (one row per affected country) across 11 countries | Broaden keyword set as more sources come online |
 | P4 | ⚪ | ~9 filings have no abstract; summaries fall back to the title | Lower-quality summaries for those rows | Optional: fetch full text |
-| P5 | 🟡 | Summarization and embedding are triggered manually (local-only endpoint / Python script) | Not yet an automated pipeline | **In progress:** RabbitMQ — fetch → `events.summarize` → `events.embed`, with retries, a dead-letter queue, and an explicit `status` column |
 | P6 | 🟡 | Edited summaries are not re-embedded | `embed_events.py` only processes rows where `embedding IS NULL` | Track `embedded_at` or a content hash |
 | P7 | 🟡 | `normalizeCountry` is a hand-maintained mapping | New variants (e.g. "Kingdom of Thailand") slip through | Map to ISO 3166 country codes |
 | P8 | 🟡 | The LLM occasionally returns the issuing country (U.S.) as the affected country | One row was corrected manually | Post-extraction validation: flag `country == "United States"` |
@@ -47,6 +46,10 @@
 | P12 | 🟡 | Duplicate check in `summarizeAndStore` uses `findAll().stream()` — O(n) per row | Fine at 122 rows; won't scale | Derived query `existsByCountryAndSourceUrl` + unique index on `(source_url, country)` |
 | P13 | 🟡 | `summarizeAndStore` is not `@Transactional` | A multi-country filing could be written partially if a save fails mid-loop | Wrap DB writes in a transaction; keep the LLM call outside it |
 | P14 | ⚪ | 7 of 12 keywords returned 0 new filings (sucralose, ascorbic acid, collagen, gelatin, stevia, sorbitol, pea protein*) | Expected — no recent AD/CVD activity for those products | None. *Pea protein rows come from an earlier fetch |
+| P15 | 🟡 | Java `SummarizeConsumer` retries permanent errors (e.g. malformed JSON) 3× before dead-lettering | Wastes ~6 s per poison message; observed in a failure drill | Throw `AmqpRejectAndDontRequeueException` for non-retryable errors so they go straight to the DLQ (the Python consumer already does this) |
+| P16 | 🟡 | Rows that exhaust retries stay `PENDING`; the scheduled run re-publishes them indefinitely | No `FAILED` transition yet | Track attempt count; mark `FAILED` after N runs and alert |
+| P17 | ⚪ | Legacy `embed_events.py` backfill writes embeddings without updating `status` | Kept only as a manual backfill tool | Update `status` in the script, or remove it |
+| P18 | ⚪ | DLQ has no tooling | Inspect and re-publish by hand in the management UI | Small re-drive script / endpoint |
 
 ## 3. Retrieval & Agent
 
@@ -70,6 +73,7 @@
 | T2 | ⚪ | Logging via `System.out.println` | SLF4J `Logger` |
 | T3 | ⚪ | Each service creates its own `new RestTemplate()` | Single shared `@Bean` with timeouts configured |
 | T4 | 🟡 | OpenAI calls have no timeout or retry | Connect/read timeouts; exponential backoff on 429 / 5xx |
+| T5 | ⚪ | `AgentOrchestrationService` uses a deprecated API (compiler warning) | Recompile with `-Xlint:deprecation` and migrate |
 
 ---
 
@@ -77,6 +81,9 @@
 
 | Date | Issue | Fix |
 |------|-------|-----|
+| 2026-10-22 | **P5** — Summarization and embedding were triggered by hand | RabbitMQ pipeline: `events.summarize` (Java consumer) → `events.embed` (Python consumer), explicit `status` column, conditional-update claims, retries, dead-letter queue, scheduled producer + reconciler. Verified with failure drills (poison message → DLQ; SIGKILL between DB commit and ack → redelivery is a no-op) |
+| 2026-10-22 | Stale-claim reconciler never fired locally: `status_updated_at` was `TIMESTAMP` (no zone), written from sessions in different time zones (JVM vs. psql) | Column changed to `TIMESTAMPTZ`; the database is the only writer; the staleness threshold is computed with `now()` in SQL |
+| 2026-10-22 | **P12 (partial)** — no uniqueness guarantee on `(source_url, country)` | Unique index `uq_event_source_country` |
 | 2026-10-20 | **P10** — If the first extracted country was blank, or the LLM omitted `summary`, `llm_summary` stayed `null` and the row was re-sent to the LLM on every run | Fall back to the original row's country; write an explicit `[no summary extracted]` marker so "processed, no result" is distinguishable from "not yet processed" |
 | 2026-10-20 | **D5** — Spring Security logged a generated default password at startup | Provide a `UserDetailsService` bean that rejects all usernames (auth is API-key based) |
 | 2026-10-20 | **D6** — `spring.jpa.open-in-view` warning | Set `spring.jpa.open-in-view=false`; verified no `LazyInitializationException` on the agent endpoint |

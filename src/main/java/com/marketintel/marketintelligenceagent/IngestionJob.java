@@ -1,0 +1,77 @@
+package com.marketintel.marketintelligenceagent;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Component;
+
+import java.time.Duration;
+import java.util.List;
+
+/**
+ * Scheduled ingestion: acts as both the producer and the reconciler of the pipeline.
+ *
+ *   1. Fetch new filings          -> rows saved as PENDING
+ *   2. Reset stale claims          -> SUMMARIZING for too long => PENDING (consumer crashed)
+ *   3. Publish every PENDING row   -> events.summarize
+ *   4. Re-publish SUMMARIZED rows  -> events.embed (covers a crash between DB write and publish)
+ *
+ * Re-publishing is safe because both consumers are idempotent.
+ */
+@Component
+public class IngestionJob {
+
+    private static final Logger log = LoggerFactory.getLogger(IngestionJob.class);
+
+    static final List<String> KEYWORDS = List.of(
+            "sucralose", "citric acid", "xanthan gum", "glycine", "vanillin",
+            "monosodium glutamate", "ascorbic acid", "collagen", "gelatin",
+            "stevia", "sorbitol", "pea protein");
+    static final int PER_PAGE = 20;
+    static final Duration STALE_AFTER = Duration.ofMinutes(10);
+
+    private final MarketEventFetcher fetcher;
+    private final MarketEventRepository repo;
+    private final EventPublisher publisher;
+    private final boolean scheduleEnabled;
+
+    public IngestionJob(MarketEventFetcher fetcher,
+                        MarketEventRepository repo,
+                        EventPublisher publisher,
+                        @Value("${app.ingestion.enabled:false}") boolean scheduleEnabled) {
+        this.fetcher = fetcher;
+        this.repo = repo;
+        this.publisher = publisher;
+        this.scheduleEnabled = scheduleEnabled;
+    }
+
+    // Federal Register publishes on business days; run once each weekday morning (Eastern).
+    @Scheduled(cron = "${app.ingestion.cron:0 0 9 * * MON-FRI}", zone = "America/New_York")
+    public void scheduledRun() {
+        if (!scheduleEnabled) {
+            log.debug("Scheduled ingestion disabled (app.ingestion.enabled=false)");
+            return;
+        }
+        runOnce();
+    }
+
+    public String runOnce() {
+        int fetched = fetcher.fetchByKeywords(KEYWORDS, PER_PAGE);
+
+        int reset = repo.resetStale(EventStatus.SUMMARIZING.name(), EventStatus.PENDING.name(),
+                (int) STALE_AFTER.toMinutes());
+
+        List<MarketEvent> pending = repo.findByStatus(EventStatus.PENDING);
+        pending.forEach(e -> publisher.publishSummarize(e.getId()));
+
+        List<MarketEvent> summarized = repo.findByStatus(EventStatus.SUMMARIZED);
+        summarized.forEach(e -> publisher.publishEmbed(e.getId()));
+
+        String result = String.format(
+                "fetched=%d, staleReset=%d, publishedSummarize=%d, republishedEmbed=%d",
+                fetched, reset, pending.size(), summarized.size());
+        log.info("Ingestion run: {}", result);
+        return result;
+    }
+}
