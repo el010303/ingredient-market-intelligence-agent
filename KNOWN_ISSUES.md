@@ -12,7 +12,6 @@
 
 | ID | Issue | Why it's next | Est. effort |
 |----|-------|---------------|-------------|
-| M1 | Pipeline not yet deployed to EC2 | RabbitMQ + Python consumer need provisioning and systemd units | 2–3 h |
 | R1 | No recency weighting in retrieval | Older, concluded reviews can be described as "ongoing"; in a glycine query, a 2026 filing ranked below a 2024 one | 1–2 h |
 | R7 | Answers don't cite source links | Users can't verify claims against the original filing | 30 min |
 | T1 | No unit tests | Needed as a safety net before the pipeline refactor | 2–3 h |
@@ -29,6 +28,7 @@
 | D7 | 🟡 | t3 instances default to "unlimited" CPU credits; building on the server could incur charges | JAR is built locally and copied over with `scp` | Keep builds off the server (CI later) |
 | D9 | ⚪ | `pg_restore` reports `must be owner of extension vector` on the `COMMENT` step | Harmless; data restores fully | Won't fix |
 | D10 | 🟡 | Hibernate `show-sql` is on; `DataSeeder` prints every ingredient to stdout | Noisy logs, including in journald on EC2 | Disable `show-sql` outside the `local` profile; switch prints to debug-level logging |
+| D11 | 🟡 | Memory headroom on the 1 GB t3.micro is thin (~217 MiB available with JVM, Postgres, RabbitMQ and the Python consumer running) | Swap configured; RabbitMQ management plugin intentionally not installed | Monitor; move to t3.small or managed services (RDS / Amazon MQ) before adding components |
 
 ## 2. Data Pipeline
 
@@ -81,6 +81,7 @@
 
 | Date | Issue | Fix |
 |------|-------|-----|
+| 2026-10-22 | Pipeline deployed to EC2 | `deploy/setup_pipeline.sh` (idempotent): RabbitMQ with a dedicated generated-password user (`guest` removed), migration, Python venv, `market-intel-embed` systemd unit; verified end-to-end in production |
 | 2026-10-22 | **P5** — Summarization and embedding were triggered by hand | RabbitMQ pipeline: `events.summarize` (Java consumer) → `events.embed` (Python consumer), explicit `status` column, conditional-update claims, retries, dead-letter queue, scheduled producer + reconciler. Verified with failure drills (poison message → DLQ; SIGKILL between DB commit and ack → redelivery is a no-op) |
 | 2026-10-22 | Stale-claim reconciler never fired locally: `status_updated_at` was `TIMESTAMP` (no zone), written from sessions in different time zones (JVM vs. psql) | Column changed to `TIMESTAMPTZ`; the database is the only writer; the staleness threshold is computed with `now()` in SQL |
 | 2026-10-22 | **P12 (partial)** — no uniqueness guarantee on `(source_url, country)` | Unique index `uq_event_source_country` |
