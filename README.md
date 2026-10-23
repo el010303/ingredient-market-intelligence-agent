@@ -54,31 +54,38 @@ This project rebuilds that workflow as a system: ingest the filings continuously
 
 ## Architecture
 
-```
-                        ┌──────────────────────── synchronous (user request) ───────────────────────┐
-  Client ──X-API-Key──▶ Spring Boot API ──▶ Agent loop (OpenAI tool calling, ≤ 4 rounds)
-                        │                        │ get_ingredient_info     → ingredients
-                        │                        │ get_market_events       → market_events (structured)
-                        │                        │ search_market_events    → pgvector similarity search
-                        │                        ▼
-                        │                   answer + reasoning trace ──▶ recommendations table
-                        └───────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph sync["Synchronous: user request"]
+        C[Client] -- "X-API-Key" --> API[Spring Boot API]
+        API --> AG["Agent loop<br/>OpenAI tool calling, max 4 rounds"]
+    end
 
-                        ┌──────────────────────── asynchronous (background) ─────────────────────────┐
-  @Scheduled job ──▶ Federal Register API ──▶ market_events (PENDING)
-        │                                              │
-        │  publish {eventId}                           │
-        ▼                                              │
-  [events.summarize] ──▶ SummarizeConsumer (Java) ──▶ LLM extraction ──▶ SUMMARIZED
-                                                             │ publish {eventId}
-                                                             ▼
-                         [events.embed] ──▶ EmbedConsumer (Python) ──▶ OpenAI embeddings ──▶ EMBEDDED
-                                                                                (pgvector)
-  failures after retries ──▶ [events.dlq]
-                        └───────────────────────────────────────────────────────────────────────────┘
+    subgraph db["PostgreSQL 16 + pgvector"]
+        ING[(ingredients)]
+        ME[(market_events<br/>status + embedding)]
+        REC[(recommendations<br/>answer + tool-call trace)]
+    end
 
-  Everything runs on one EC2 instance: Spring Boot API, PostgreSQL 16 + pgvector, RabbitMQ, Python consumer
+    subgraph async["Asynchronous: background pipeline"]
+        JOB["Scheduled ingestion job<br/>producer + reconciler"] -- fetch --> FR[Federal Register API]
+        JOB -- "publish eventId" --> QS[["events.summarize"]]
+        QS --> SC["SummarizeConsumer (Java)<br/>LLM structured extraction"]
+        SC -- "publish eventId" --> QE[["events.embed"]]
+        QE --> EC["EmbedConsumer (Python)<br/>OpenAI embeddings"]
+        QS -. "retries exhausted" .-> DLQ[["events.dlq"]]
+        QE -. "retries exhausted" .-> DLQ
+    end
+
+    AG -- get_ingredient_info --> ING
+    AG -- "get_market_events / search_market_events" --> ME
+    AG -- "save answer + trace" --> REC
+    JOB -- "insert PENDING" --> ME
+    SC -- "write summary, SUMMARIZED" --> ME
+    EC -- "write vector, EMBEDDED" --> ME
 ```
+
+All components run on one EC2 instance: Spring Boot API, PostgreSQL 16 + pgvector, RabbitMQ, and the Python consumer.
 
 **The sync/async boundary is the core design decision.** User queries read only from the database and return in seconds. Fetching, LLM extraction and embedding happen in the background, so a slow or failing external API (Federal Register, OpenAI) never blocks or breaks a user-facing request.
 
