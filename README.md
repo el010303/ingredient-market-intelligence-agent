@@ -2,12 +2,10 @@
 
 An LLM agent that answers ingredient-sourcing questions ("what's the tariff risk on glycine from India?") using only evidence retrieved from U.S. trade-remedy filings. It's backed by an asynchronous, failure-tested ingestion pipeline and deployed on AWS EC2.
 
-| | |
-|---|---|
-| **Problem** | Sourcing decisions depend on antidumping / countervailing duty filings scattered across the Federal Register. I did this analysis by hand in a previous role. |
-| **Built** | Tool-calling agent (Spring Boot + OpenAI) · pgvector retrieval in PostgreSQL · RabbitMQ pipeline with Java and Python consumers · API-key auth · scripted EC2 deployment |
-| **Verified** | At-least-once delivery with idempotent consumers, proven by killing a consumer mid-flight · poison messages dead-lettered · automatic recovery after instance reboot |
-| **Not yet** | Web dashboard, two more data sources, recency weighting. Tracked openly in [KNOWN_ISSUES.md](KNOWN_ISSUES.md) |
+- **Problem:** Sourcing decisions depend on antidumping / countervailing duty filings scattered across the Federal Register. I did this analysis by hand in a previous role.
+- **Built:** Tool-calling agent (Spring Boot + OpenAI) · pgvector retrieval in PostgreSQL · RabbitMQ pipeline with Java and Python consumers · API-key auth · scripted EC2 deployment
+- **Verified:** At-least-once delivery with idempotent consumers, proven by killing a consumer mid-flight · poison messages dead-lettered · automatic recovery after instance reboot
+- **Not yet:** Web dashboard, two more data sources, recency weighting. Tracked openly in [KNOWN_ISSUES.md](KNOWN_ISSUES.md)
 
 ## Engineering highlights
 
