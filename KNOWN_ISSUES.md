@@ -12,7 +12,7 @@
 
 | ID | Issue | Why it's next | Est. effort |
 |----|-------|---------------|-------------|
-| P1 | Single data source (Federal Register) | Two more trade-policy sources planned | 0.5–1 day |
+| P1 | Third data source (Regulations.gov) not integrated yet | Federal Register + USITC HTS are live | 2–3 h |
 | F1 | No web dashboard | Next.js + TypeScript UI for queries, reasoning traces and pipeline status | 1–2 days |
 | T1 | No unit tests | Safety net for ranking, extraction parsing and auth | 2–3 h |
 
@@ -63,6 +63,8 @@
 | R8 | 🟡 | Occasional over-inference (e.g. price trends not present in the data) | — | Stricter "tool results only" instruction + groundedness check |
 | R9 | 🟡 | No evaluation loop | Quality is judged by manual inspection | Small eval set with manual scoring |
 | R10 | 🟡 | The agent does not reliably flag superseded filings (e.g. a preliminary result followed by the final result for the same review period) | Prompted to, but the model misses it from free text | Extract case, review period and stage (preliminary/final) as structured fields at summarization time; mark superseded rows in code |
+| R11 | 🔴 | Extraction can confuse the **period of review** with the **effective date** (e.g. a CVD review for POR 2024 stored as "effective 2024-01-01"); the agent then repeats it | Grounding rules can't catch wrong source data | Extract `period_of_review` and `effective_date` as separate fields with explicit definitions in the prompt; add labeled test cases |
+| R12 | ⚪ | The model sometimes omits the source link for the HTS base duty even though the tool returns it | — | Tighten the prompt or append citations in code from the tool trace |
 
 ## 4. Testing & Code Quality
 
@@ -80,6 +82,7 @@
 
 | Date | Issue | Fix |
 |------|-------|-----|
+| 2026-10-23 | **P1 (partial)** — Only one data source | Added USITC HTS REST API as data source 2: base (MFN) duty per ingredient, change detection against a `tariff_rates` snapshot, baseline/change events sent straight to embedding (no LLM for structured data), 8-digit rate inheritance for 10-digit statistical suffixes, new `get_tariff_rate` agent tool |
 | 2026-10-22 | **R1** — No recency weighting; older filings outranked newer ones | Two-stage retrieval: similarity threshold as a relevance gate, then rank by `similarity × (0.5 + 0.5 × 0.5^(age_days/365))`. Per-country lookup returns the 10 most recent filings. Verified: glycine query now returns 2026 filings first |
 | 2026-10-22 | **R7** — Answers had no source links; no system prompt | Tools return `source_url`; new system prompt (with today's date) requires a date and `[title](url)` for every filing, tool-results-only answers, and a bottom line |
 | 2026-10-22 | Pipeline deployed to EC2 | `deploy/setup_pipeline.sh` (idempotent): RabbitMQ with a dedicated generated-password user (`guest` removed), migration, Python venv, `market-intel-embed` systemd unit; verified end-to-end in production |

@@ -130,4 +130,31 @@ public class AgentToolService {
         }
         return String.join("\n", lines);
     }
+
+    // get_tariff_rate: U.S. base (general/MFN) duty from the USITC HTS for an ingredient
+    public String getTariffRateAsText(String ingredient) {
+        List<String> lines = jdbcTemplate.query("""
+                SELECT DISTINCT i.name, t.hts_code, t.description, t.general_rate, t.special_rate,
+                       t.other_rate, t.fetched_at
+                FROM ingredients i
+                JOIN tariff_rates t ON t.hts_code = i.hts_code
+                WHERE lower(i.name) = lower(?)
+                """,
+            (rs, n) -> "- " + rs.getString("name")
+                + " | HTS: " + rs.getString("hts_code")
+                + " (" + rs.getString("description") + ")"
+                + " | general (MFN) rate: " + rs.getString("general_rate")
+                + " | column-2 rate: " + rs.getString("other_rate")
+                + " | special programs: " + rs.getString("special_rate")
+                + " | checked: " + rs.getObject("fetched_at")
+                + " | source: " + HtsRateFetcher.SEARCH_PAGE + rs.getString("hts_code"),
+            ingredient);
+        if (lines.isEmpty()) {
+            return "No HTS base-rate mapping for ingredient: " + ingredient
+                + ". The ingredient may have no dedicated HTS line in this system.";
+        }
+        return String.join("\n", lines)
+            + "\nNote: this is the base duty only. Antidumping/countervailing duties (see market events)"
+            + " and other additional duties (e.g. Section 301 / Chapter 99) are separate and not included here.";
+    }
 }

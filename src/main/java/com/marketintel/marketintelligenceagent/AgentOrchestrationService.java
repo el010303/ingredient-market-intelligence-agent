@@ -39,6 +39,7 @@ public class AgentOrchestrationService {
             - For every filing you mention, include its publication date and its source as a markdown link: [title](url).
             - Lead with the most recent filings. If an older filing in the same case has been followed by a newer one, say that the newer one supersedes it.
             - Do not invent tariff rates, dates, outcomes, prices or trends that are not in the tool results.
+            - For duty or cost questions, state the base (MFN) duty and any antidumping/countervailing duties separately; never add them up unless both rates are given.
             - End with a short "Bottom line" for the buyer.
             """;
 
@@ -69,6 +70,20 @@ public class AgentOrchestrationService {
                       "country": {"type": "string", "description": "The country name, e.g. 'China'"}
                     },
                     "required": ["country"]
+                  }
+                }
+              },
+              {
+                "type": "function",
+                "function": {
+                  "name": "get_tariff_rate",
+                  "description": "Get the U.S. base (general/MFN) import duty for an ingredient from the USITC Harmonized Tariff Schedule. Use this for questions about total duty or cost; combine it with antidumping/countervailing filings from the market-event tools.",
+                  "parameters": {
+                    "type": "object",
+                    "properties": {
+                      "ingredient": {"type": "string", "description": "The ingredient name, e.g. 'Glycine'"}
+                    },
+                    "required": ["ingredient"]
                   }
                 }
               },
@@ -151,6 +166,7 @@ public class AgentOrchestrationService {
           case "get_ingredient_info" -> agentToolService.getIngredientInfoAsText(args.path("name").asText());
           case "get_market_events" -> agentToolService.getMarketEventsAsText(args.path("country").asText());
           case "search_market_events" -> agentToolService.searchMarketEventsAsText(args.path("query").asText());
+          case "get_tariff_rate" -> agentToolService.getTariffRateAsText(args.path("ingredient").asText());
           default -> "Unknown tool: " + functionName;
       };
     }

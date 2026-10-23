@@ -16,6 +16,7 @@ import java.util.List;
  *   2. Reset stale claims          -> SUMMARIZING for too long => PENDING (consumer crashed)
  *   3. Publish every PENDING row   -> events.summarize
  *   4. Re-publish SUMMARIZED rows  -> events.embed (covers a crash between DB write and publish)
+ *   5. Check USITC HTS base rates  -> baseline / change events, straight to events.embed (no LLM)
  *
  * Re-publishing is safe because both consumers are idempotent.
  */
@@ -34,15 +35,18 @@ public class IngestionJob {
     private final MarketEventFetcher fetcher;
     private final MarketEventRepository repo;
     private final EventPublisher publisher;
+    private final HtsRateFetcher htsRateFetcher;
     private final boolean scheduleEnabled;
 
     public IngestionJob(MarketEventFetcher fetcher,
                         MarketEventRepository repo,
                         EventPublisher publisher,
+                        HtsRateFetcher htsRateFetcher,
                         @Value("${app.ingestion.enabled:false}") boolean scheduleEnabled) {
         this.fetcher = fetcher;
         this.repo = repo;
         this.publisher = publisher;
+        this.htsRateFetcher = htsRateFetcher;
         this.scheduleEnabled = scheduleEnabled;
     }
 
@@ -68,9 +72,12 @@ public class IngestionJob {
         List<MarketEvent> summarized = repo.findByStatus(EventStatus.SUMMARIZED);
         summarized.forEach(e -> publisher.publishEmbed(e.getId()));
 
+        // Last, so its freshly published rows aren't re-published again in step 4
+        int htsEvents = htsRateFetcher.fetchAll();
+
         String result = String.format(
-                "fetched=%d, staleReset=%d, publishedSummarize=%d, republishedEmbed=%d",
-                fetched, reset, pending.size(), summarized.size());
+                "fetched=%d, staleReset=%d, publishedSummarize=%d, republishedEmbed=%d, htsEvents=%d",
+                fetched, reset, pending.size(), summarized.size(), htsEvents);
         log.info("Ingestion run: {}", result);
         return result;
     }
