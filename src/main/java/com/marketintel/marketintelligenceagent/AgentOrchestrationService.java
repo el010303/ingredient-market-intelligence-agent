@@ -109,7 +109,7 @@ public class AgentOrchestrationService {
         this.recommendationRepository = recommendationRepository;
     }
 
-    public String handleQuery(String userQuery) {
+    public AgentResult handleQuery(String userQuery) {
         List<Map<String, Object>> toolTrace = new ArrayList<>();
         ArrayNode messages = jsonMapper.createArrayNode();
         ObjectNode systemMessage = jsonMapper.createObjectNode();
@@ -133,7 +133,7 @@ public class AgentOrchestrationService {
             if (!toolCalls.isArray() || toolCalls.isEmpty()) {
                 String answer = message.path("content").asText();
                 saveRecommendation(userQuery, answer, toolTrace);
-                return answer;
+                return new AgentResult(answer, toolTrace);
             }
             
             messages.add(message);
@@ -149,6 +149,8 @@ public class AgentOrchestrationService {
                 traceEntry.put("round", round);
                 traceEntry.put("tool", functionName);
                 traceEntry.put("arguments", argsJson);
+                // First part of what the tool returned: the "supporting data" behind the answer
+                traceEntry.put("resultPreview", result.length() > 300 ? result.substring(0, 300) + "..." : result);
                 toolTrace.add(traceEntry);
 
                 ObjectNode toolMessage = jsonMapper.createObjectNode();
@@ -158,7 +160,8 @@ public class AgentOrchestrationService {
                 messages.add(toolMessage);
             }
         }
-        return "Agent could not complete the query within the allowed number of tool-call rounds.";
+        return new AgentResult(
+                "Agent could not complete the query within the allowed number of tool-call rounds.", toolTrace);
     }
 
     private String executeToolCall(String functionName, JsonNode args) {

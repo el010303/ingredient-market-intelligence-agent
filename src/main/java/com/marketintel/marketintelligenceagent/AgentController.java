@@ -14,7 +14,7 @@ public class AgentController {
     }
 
     @GetMapping("/api/agent/query")
-    public String query(@RequestParam String q) {
+    public AgentResult query(@RequestParam String q) {
         return agentOrchestrationService.handleQuery(q);
     }
 }

@@ -4,6 +4,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
@@ -37,6 +38,7 @@ public class IngestionJob {
     private final EventPublisher publisher;
     private final HtsRateFetcher htsRateFetcher;
     private final RegulationsGovFetcher regulationsGovFetcher;
+    private final JdbcTemplate jdbc;
     private final boolean scheduleEnabled;
 
     public IngestionJob(MarketEventFetcher fetcher,
@@ -44,12 +46,14 @@ public class IngestionJob {
                         EventPublisher publisher,
                         HtsRateFetcher htsRateFetcher,
                         RegulationsGovFetcher regulationsGovFetcher,
+                        JdbcTemplate jdbc,
                         @Value("${app.ingestion.enabled:false}") boolean scheduleEnabled) {
         this.fetcher = fetcher;
         this.repo = repo;
         this.publisher = publisher;
         this.htsRateFetcher = htsRateFetcher;
         this.regulationsGovFetcher = regulationsGovFetcher;
+        this.jdbc = jdbc;
         this.scheduleEnabled = scheduleEnabled;
     }
 
@@ -60,10 +64,29 @@ public class IngestionJob {
             log.debug("Scheduled ingestion disabled (app.ingestion.enabled=false)");
             return;
         }
-        runOnce();
+        runOnce("schedule");
     }
 
     public String runOnce() {
+        return runOnce("manual");
+    }
+
+    /** Runs the job and records it in ingestion_runs (start, finish, result or error). */
+    public String runOnce(String trigger) {
+        Long runId = jdbc.queryForObject(
+                "INSERT INTO ingestion_runs (trigger) VALUES (?) RETURNING id", Long.class, trigger);
+        try {
+            String result = doRun();
+            jdbc.update("UPDATE ingestion_runs SET finished_at = now(), result = ? WHERE id = ?", result, runId);
+            return result;
+        } catch (RuntimeException e) {
+            jdbc.update("UPDATE ingestion_runs SET finished_at = now(), error = ? WHERE id = ?",
+                    e.getClass().getSimpleName() + ": " + e.getMessage(), runId);
+            throw e;
+        }
+    }
+
+    private String doRun() {
         int fetched = fetcher.fetchByKeywords(KEYWORDS, PER_PAGE);
         int fetchedRegs = regulationsGovFetcher.fetch();
 

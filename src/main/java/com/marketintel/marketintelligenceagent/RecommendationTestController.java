@@ -98,7 +98,7 @@ public class RecommendationTestController {
     }
 
     @GetMapping("/test/agent-query")
-    public String testAgentQuery(@RequestParam String q) {
+    public AgentResult testAgentQuery(@RequestParam String q) {
         return agentOrchestrationService.handleQuery(q);
     }
 
