@@ -8,6 +8,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.*;
 import org.springframework.web.client.RestTemplate;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -26,6 +27,20 @@ public class AgentOrchestrationService {
     private final RecommendationRepository recommendationRepository;
 
     private static final int MAX_ROUNDS = 4;
+
+    // Grounding rules: answer only from tool results, cite every filing with its source link,
+    // and reason about recency explicitly (filings can be superseded by later ones in the same case).
+    private static final String SYSTEM_PROMPT = """
+            You are a trade-policy analyst helping an ingredient buyer assess sourcing risk.
+            Today's date is %s.
+
+            Rules:
+            - Use ONLY facts returned by the tools. If the tools return nothing relevant, say so plainly.
+            - For every filing you mention, include its publication date and its source as a markdown link: [title](url).
+            - Lead with the most recent filings. If an older filing in the same case has been followed by a newer one, say that the newer one supersedes it.
+            - Do not invent tariff rates, dates, outcomes, prices or trends that are not in the tool results.
+            - End with a short "Bottom line" for the buyer.
+            """;
 
     private static final String TOOLS_DEFINITION = """
             [
@@ -82,6 +97,10 @@ public class AgentOrchestrationService {
     public String handleQuery(String userQuery) {
         List<Map<String, Object>> toolTrace = new ArrayList<>();
         ArrayNode messages = jsonMapper.createArrayNode();
+        ObjectNode systemMessage = jsonMapper.createObjectNode();
+        systemMessage.put("role", "system");
+        systemMessage.put("content", SYSTEM_PROMPT.formatted(LocalDate.now()));
+        messages.add(systemMessage);
         ObjectNode userMessage = jsonMapper.createObjectNode();
         userMessage.put("role", "user");
         userMessage.put("content", userQuery);

@@ -5,7 +5,7 @@ An LLM agent that answers ingredient-sourcing questions ("what's the tariff risk
 - **Problem:** Sourcing decisions depend on antidumping / countervailing duty filings scattered across the Federal Register. I did this analysis by hand in a previous role.
 - **Built:** Tool-calling agent (Spring Boot + OpenAI) · pgvector retrieval in PostgreSQL · RabbitMQ pipeline with Java and Python consumers · API-key auth · scripted EC2 deployment
 - **Verified:** At-least-once delivery with idempotent consumers, proven by killing a consumer mid-flight · poison messages dead-lettered · automatic recovery after instance reboot
-- **Not yet:** Web dashboard, two more data sources, recency weighting. Tracked openly in [KNOWN_ISSUES.md](KNOWN_ISSUES.md)
+- **Not yet:** Web dashboard, two more data sources. Tracked openly in [KNOWN_ISSUES.md](KNOWN_ISSUES.md)
 
 ## Engineering highlights
 
@@ -17,21 +17,31 @@ An LLM agent that answers ingredient-sourcing questions ("what's the tariff risk
 
 ## Example
 
+Real output from the deployed agent (trimmed to three of five filings):
+
 ```text
 $ curl -H "X-API-Key: ..." "http://<host>:8080/api/agent/query?q=glycine%20tariff%20risk"
 
-There are several market events related to glycine tariff risk, particularly concerning
-imports from China, India, Japan, and Thailand:
+1. Glycine From India: Preliminary Results and Rescission, in Part, of Countervailing Duty
+   Administrative Review; 2024. Published 2026-09-14
+   Commerce preliminarily determined that countervailable subsidies were provided to producers
+   and exporters of glycine from India.
+   Source: [Federal Register](https://www.federalregister.gov/documents/2026/09/14/2026-18719/...)
 
-1. Expedited Five-Year Reviews: The U.S. is reviewing antidumping and countervailing duty
-   orders on glycine imports from China, India, Japan, and Thailand (Published: Sep 18, 2024).
-2. Countervailing Duty Administrative Review (Preliminary Results): The U.S. Department of
-   Commerce has preliminarily determined that countervailable subsidies were provided to
-   producers and exporters of glycine from India (Published: Sep 14, 2026).
+2. Glycine From India: Final Results of Antidumping Duty Administrative Review; 2023-2024;
+   Correction. Published 2026-07-08
+   Source: [Federal Register](https://www.federalregister.gov/documents/2026/07/08/2026-13780/...)
+
+3. Glycine From India: Final Results of Countervailing Duty Administrative Review; 2023.
+   Published 2026-06-16
+   Source: [Federal Register](https://www.federalregister.gov/documents/2026/06/16/2026-12103/...)
 ...
+
+Bottom line: The latest findings indicate ongoing scrutiny of glycine imports from India,
+with risk from both countervailing and antidumping duties.
 ```
 
-The ordering above shows a known gap: results are ranked by similarity only, so a 2024 filing outranks a 2026 one. Recency weighting is the next retrieval change.
+Every claim comes from a tool result and links to its source filing, and recent filings rank first (see [retrieval ranking](#how-a-query-works-synchronous-path)). One known gap: the model doesn't reliably flag when a preliminary result has been superseded by the final result for the same review period. The fix is structural (extract case, review period and stage as fields) rather than more prompting. See [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
 
 ## What would change at larger scale
 
@@ -82,8 +92,13 @@ All components run on one EC2 instance: Spring Boot API, PostgreSQL 16 + pgvecto
 
 1. `GET /api/agent/query?q=...` with an `X-API-Key` header (custom Spring Security filter, constant-time comparison).
 2. `AgentOrchestrationService` sends the question to `gpt-4o-mini` with three tool definitions and runs a bounded loop (max 4 rounds): the model chooses tools, the service executes them against PostgreSQL, results go back to the model as `tool` messages.
-3. `search_market_events` embeds the query and runs a pgvector cosine search with a similarity threshold (0.30) and one result per source document (`DISTINCT ON (source_url)`).
-4. The final answer is stored in `recommendations` together with the full tool-call trace (`reasoning_trace` JSONB): which tool, which arguments, in which round.
+3. `search_market_events` embeds the query and runs a pgvector cosine search in two stages:
+   - **Relevance gate:** similarity threshold (0.30), one result per source document (`DISTINCT ON (source_url)`).
+   - **Ranking:** `score = similarity × (0.5 + 0.5 × 0.5^(age_days / 365))`. Recency only re-orders filings that already passed the gate, so a new but irrelevant filing can never outrank an older relevant one. The floor of 0.5 keeps older filings in play, since AD/CVD orders typically run for five years.
+
+   `get_market_events` returns a country's 10 most recent filings, newest first.
+4. A system prompt restricts the model to tool results, requires a publication date and source link for every filing mentioned, and asks it to lead with the most recent evidence.
+5. The final answer is stored in `recommendations` together with the full tool-call trace (`reasoning_trace` JSONB): which tool, which arguments, in which round.
 
 ---
 
@@ -192,8 +207,6 @@ Single AWS EC2 instance (t3.micro, Ubuntu 24.04):
 
 Not built yet (tracked in [KNOWN_ISSUES.md](KNOWN_ISSUES.md)):
 
-- [ ] **Recency weighting** in retrieval (concluded reviews can currently rank above recent ones)
-- [ ] **Source links** in answers
 - [ ] **Two more data sources** (only the Federal Register today)
 - [ ] **Next.js + TypeScript dashboard**: query view with reasoning trace, pipeline status view
 - [ ] Additional agent tools: tariff summarization on demand, similar-customer lookup

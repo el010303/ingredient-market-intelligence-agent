@@ -1,6 +1,6 @@
 # Known Issues & Limitations
 
-> Last updated: 2026-10-22
+> Last updated: 2026-10-22 (late)
 >
 > This file tracks issues that are **known but not yet fixed**. When an issue is resolved, it moves to the [Changelog](#changelog) at the bottom with a note on how it was fixed.
 >
@@ -12,9 +12,9 @@
 
 | ID | Issue | Why it's next | Est. effort |
 |----|-------|---------------|-------------|
-| R1 | No recency weighting in retrieval | Older, concluded reviews can be described as "ongoing"; in a glycine query, a 2026 filing ranked below a 2024 one | 1–2 h |
-| R7 | Answers don't cite source links | Users can't verify claims against the original filing | 30 min |
-| T1 | No unit tests | Needed as a safety net before the pipeline refactor | 2–3 h |
+| P1 | Single data source (Federal Register) | Two more trade-policy sources planned | 0.5–1 day |
+| F1 | No web dashboard | Next.js + TypeScript UI for queries, reasoning traces and pipeline status | 1–2 days |
+| T1 | No unit tests | Safety net for ranking, extraction parsing and auth | 2–3 h |
 
 ---
 
@@ -55,15 +55,14 @@
 
 | ID | Sev. | Issue | Current state / workaround | Planned fix |
 |----|------|-------|----------------------------|-------------|
-| R1 | 🔴 | No recency weighting | Concluded investigations can be presented as current | `score = similarity × decay(age)`, or an `event_date` term in the SQL ranking |
 | R2 | 🟡 | Similarity threshold (0.30) is a heuristic | Not backed by an eval set | Tune against a ~20-query eval set |
 | R3 | 🟡 | `DISTINCT ON (source_url)` keeps one row per filing | Multi-country filings may surface the wrong country | `DISTINCT ON (source_url, country)` |
 | R4 | 🟡 | `get_ingredient_info` / `get_market_events` load all rows and filter in memory | Acceptable at current size | Repository queries |
 | R5 | 🟡 | Country lookup is exact-match and depends on normalization | Unnormalized variants are missed | Fixed together with P7 |
 | R6 | ⚪ | `query_type` is hard-coded; `recommended_options` stores free text | Works, but not structured | Intent classification + structured options |
-| R7 | 🟡 | Answers don't include source links | Claims aren't verifiable by the user | Return `source_url` from tools; require citations in the prompt |
 | R8 | 🟡 | Occasional over-inference (e.g. price trends not present in the data) | — | Stricter "tool results only" instruction + groundedness check |
 | R9 | 🟡 | No evaluation loop | Quality is judged by manual inspection | Small eval set with manual scoring |
+| R10 | 🟡 | The agent does not reliably flag superseded filings (e.g. a preliminary result followed by the final result for the same review period) | Prompted to, but the model misses it from free text | Extract case, review period and stage (preliminary/final) as structured fields at summarization time; mark superseded rows in code |
 
 ## 4. Testing & Code Quality
 
@@ -81,6 +80,8 @@
 
 | Date | Issue | Fix |
 |------|-------|-----|
+| 2026-10-22 | **R1** — No recency weighting; older filings outranked newer ones | Two-stage retrieval: similarity threshold as a relevance gate, then rank by `similarity × (0.5 + 0.5 × 0.5^(age_days/365))`. Per-country lookup returns the 10 most recent filings. Verified: glycine query now returns 2026 filings first |
+| 2026-10-22 | **R7** — Answers had no source links; no system prompt | Tools return `source_url`; new system prompt (with today's date) requires a date and `[title](url)` for every filing, tool-results-only answers, and a bottom line |
 | 2026-10-22 | Pipeline deployed to EC2 | `deploy/setup_pipeline.sh` (idempotent): RabbitMQ with a dedicated generated-password user (`guest` removed), migration, Python venv, `market-intel-embed` systemd unit; verified end-to-end in production |
 | 2026-10-22 | **P5** — Summarization and embedding were triggered by hand | RabbitMQ pipeline: `events.summarize` (Java consumer) → `events.embed` (Python consumer), explicit `status` column, conditional-update claims, retries, dead-letter queue, scheduled producer + reconciler. Verified with failure drills (poison message → DLQ; SIGKILL between DB commit and ack → redelivery is a no-op) |
 | 2026-10-22 | Stale-claim reconciler never fired locally: `status_updated_at` was `TIMESTAMP` (no zone), written from sessions in different time zones (JVM vs. psql) | Column changed to `TIMESTAMPTZ`; the database is the only writer; the staleness threshold is computed with `now()` in SQL |
