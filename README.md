@@ -56,33 +56,20 @@ This project rebuilds that workflow as a system: ingest the filings continuously
 
 ```mermaid
 flowchart TB
-    subgraph sync["Synchronous: user request"]
-        C[Client] -- "X-API-Key" --> API[Spring Boot API]
-        API --> AG["Agent loop<br/>OpenAI tool calling, max 4 rounds"]
+    subgraph sync["Request path (synchronous)"]
+        direction LR
+        C[Client] -- "X-API-Key" --> A["Spring Boot API<br/>tool-calling agent"]
     end
 
-    subgraph db["PostgreSQL 16 + pgvector"]
-        ING[(ingredients)]
-        ME[(market_events<br/>status + embedding)]
-        REC[(recommendations<br/>answer + tool-call trace)]
+    subgraph async["Ingestion path (asynchronous, RabbitMQ)"]
+        direction LR
+        FR[Federal Register] --> J[Scheduled job] --> Q1[["summarize queue"]] --> S["Java consumer<br/>LLM extraction"] --> Q2[["embed queue"]] --> E["Python consumer<br/>embeddings"]
     end
 
-    subgraph async["Asynchronous: background pipeline"]
-        JOB["Scheduled ingestion job<br/>producer + reconciler"] -- fetch --> FR[Federal Register API]
-        JOB -- "publish eventId" --> QS[["events.summarize"]]
-        QS --> SC["SummarizeConsumer (Java)<br/>LLM structured extraction"]
-        SC -- "publish eventId" --> QE[["events.embed"]]
-        QE --> EC["EmbedConsumer (Python)<br/>OpenAI embeddings"]
-        QS -. "retries exhausted" .-> DLQ[["events.dlq"]]
-        QE -. "retries exhausted" .-> DLQ
-    end
+    DB[("PostgreSQL + pgvector")]
 
-    AG -- get_ingredient_info --> ING
-    AG -- "get_market_events / search_market_events" --> ME
-    AG -- "save answer + trace" --> REC
-    JOB -- "insert PENDING" --> ME
-    SC -- "write summary, SUMMARIZED" --> ME
-    EC -- "write vector, EMBEDDED" --> ME
+    A -- "read via tools, save trace" --> DB
+    async -- "status, summaries, vectors" --> DB
 ```
 
 All components run on one EC2 instance: Spring Boot API, PostgreSQL 16 + pgvector, RabbitMQ, and the Python consumer.
