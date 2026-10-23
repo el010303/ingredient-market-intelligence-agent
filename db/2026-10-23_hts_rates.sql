@@ -1,5 +1,8 @@
 -- Migration: USITC HTS base tariff rates (data source 2)
 -- Run once per environment, before deploying the version that uses tariff_rates.
+-- Run it AS THE APPLICATION'S DATABASE USER. If it is run as a superuser (e.g. sudo -u postgres),
+-- the new table is owned by that superuser and the application gets "permission denied";
+-- fix with: ALTER TABLE tariff_rates OWNER TO <app_db_user>;
 
 BEGIN;
 

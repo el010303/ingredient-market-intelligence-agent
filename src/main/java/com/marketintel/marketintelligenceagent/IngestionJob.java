@@ -12,7 +12,7 @@ import java.util.List;
 /**
  * Scheduled ingestion: acts as both the producer and the reconciler of the pipeline.
  *
- *   1. Fetch new filings          -> rows saved as PENDING
+ *   1. Fetch new filings          -> rows saved as PENDING (Federal Register + Regulations.gov)
  *   2. Reset stale claims          -> SUMMARIZING for too long => PENDING (consumer crashed)
  *   3. Publish every PENDING row   -> events.summarize
  *   4. Re-publish SUMMARIZED rows  -> events.embed (covers a crash between DB write and publish)
@@ -36,17 +36,20 @@ public class IngestionJob {
     private final MarketEventRepository repo;
     private final EventPublisher publisher;
     private final HtsRateFetcher htsRateFetcher;
+    private final RegulationsGovFetcher regulationsGovFetcher;
     private final boolean scheduleEnabled;
 
     public IngestionJob(MarketEventFetcher fetcher,
                         MarketEventRepository repo,
                         EventPublisher publisher,
                         HtsRateFetcher htsRateFetcher,
+                        RegulationsGovFetcher regulationsGovFetcher,
                         @Value("${app.ingestion.enabled:false}") boolean scheduleEnabled) {
         this.fetcher = fetcher;
         this.repo = repo;
         this.publisher = publisher;
         this.htsRateFetcher = htsRateFetcher;
+        this.regulationsGovFetcher = regulationsGovFetcher;
         this.scheduleEnabled = scheduleEnabled;
     }
 
@@ -62,6 +65,7 @@ public class IngestionJob {
 
     public String runOnce() {
         int fetched = fetcher.fetchByKeywords(KEYWORDS, PER_PAGE);
+        int fetchedRegs = regulationsGovFetcher.fetch();
 
         int reset = repo.resetStale(EventStatus.SUMMARIZING.name(), EventStatus.PENDING.name(),
                 (int) STALE_AFTER.toMinutes());
@@ -76,8 +80,8 @@ public class IngestionJob {
         int htsEvents = htsRateFetcher.fetchAll();
 
         String result = String.format(
-                "fetched=%d, staleReset=%d, publishedSummarize=%d, republishedEmbed=%d, htsEvents=%d",
-                fetched, reset, pending.size(), summarized.size(), htsEvents);
+                "fetchedFR=%d, fetchedRegs=%d, staleReset=%d, publishedSummarize=%d, republishedEmbed=%d, htsEvents=%d",
+                fetched, fetchedRegs, reset, pending.size(), summarized.size(), htsEvents);
         log.info("Ingestion run: {}", result);
         return result;
     }

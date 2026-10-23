@@ -1,11 +1,11 @@
 # Ingredient & Trade Market Intelligence Agent
 
-An LLM agent that answers ingredient-sourcing questions ("what's the tariff risk on glycine from India?") using only evidence retrieved from U.S. trade-remedy filings. It's backed by an asynchronous, failure-tested ingestion pipeline and deployed on AWS EC2.
+An LLM agent that answers ingredient-sourcing questions ("what's the tariff risk on glycine from India?") using only evidence retrieved from three official U.S. trade-policy sources. It's backed by an asynchronous, failure-tested ingestion pipeline and deployed on AWS EC2.
 
-- **Problem:** Sourcing decisions depend on antidumping / countervailing duty filings scattered across the Federal Register. I did this analysis by hand in a previous role.
-- **Built:** Tool-calling agent (Spring Boot + OpenAI) · pgvector retrieval in PostgreSQL · RabbitMQ pipeline with Java and Python consumers · API-key auth · scripted EC2 deployment
+- **Problem:** Sourcing decisions depend on duties set by three different agencies: AD/CVD filings (Commerce, Federal Register), Section 301 actions (USTR) and base tariff rates (USITC). I did this analysis by hand in a previous role.
+- **Built:** Tool-calling agent (Spring Boot + OpenAI) · ingestion from 3 external sources · pgvector retrieval in PostgreSQL · RabbitMQ pipeline with Java and Python consumers · API-key auth · scripted EC2 deployment
 - **Verified:** At-least-once delivery with idempotent consumers, proven by killing a consumer mid-flight · poison messages dead-lettered · automatic recovery after instance reboot
-- **Not yet:** Web dashboard, two more data sources. Tracked openly in [KNOWN_ISSUES.md](KNOWN_ISSUES.md)
+- **Not yet:** Web dashboard. Tracked openly in [KNOWN_ISSUES.md](KNOWN_ISSUES.md)
 
 ## Engineering highlights
 
@@ -13,7 +13,8 @@ An LLM agent that answers ingredient-sourcing questions ("what's the tariff risk
 2. **Idempotency chosen by cost.** The expensive LLM step claims work before running; the cheap embedding step writes conditionally with no claim. → [ADR-006](#adr-006-choose-idempotency-by-the-cost-of-repeating-a-step)
 3. **A bug that only appeared on one machine.** The stale-work reconciler silently matched nothing because a zone-less `TIMESTAMP` column was written from sessions in different time zones. Fixed with `TIMESTAMPTZ` and the database as the single clock. → [ADR-007](#adr-007-one-clock-for-pipeline-timestamps-timestamptz-written-by-the-database)
 4. **LLM output treated as untrusted input.** Structured extraction returns `null` instead of guessing, and real filings forced handling for code fences, multi-country notices, issuing-vs-affected country confusion and inconsistent names. Every agent answer is stored with its full tool-call trace. → [LLM extraction](#llm-extraction)
-5. **Production basics done properly.** Secrets never in the repo, generated server-side and never printed. Idempotent provisioning script. Rollback-safe JAR swaps. systemd recovery verified with a reboot. → [Deployment](#deployment)
+5. **Three sources, each handled the way its data deserves.** Unstructured legal text (Federal Register, Regulations.gov) goes through LLM extraction; the structured USITC tariff API skips the LLM entirely and is diffed against a snapshot to emit change events. Documents published in both Regulations.gov and the Federal Register are deduplicated by FR document number. → [Data sources](#data-sources)
+6. **Production basics done properly.** Secrets never in the repo, generated server-side and never printed. Idempotent provisioning script. Rollback-safe JAR swaps. systemd recovery verified with a reboot. → [Deployment](#deployment)
 
 ## Example
 
@@ -73,7 +74,7 @@ flowchart TB
 
     subgraph async["Ingestion path (asynchronous, RabbitMQ)"]
         direction LR
-        FR[Federal Register] --> J[Scheduled job] --> Q1[["summarize queue"]] --> S["Java consumer<br/>LLM extraction"] --> Q2[["embed queue"]] --> E["Python consumer<br/>embeddings"]
+        FR["Federal Register<br/>Regulations.gov<br/>USITC HTS"] --> J[Scheduled job] --> Q1[["summarize queue"]] --> S["Java consumer<br/>LLM extraction"] --> Q2[["embed queue"]] --> E["Python consumer<br/>embeddings"]
     end
 
     DB[("PostgreSQL + pgvector")]
@@ -84,20 +85,20 @@ flowchart TB
 
 All components run on one EC2 instance: Spring Boot API, PostgreSQL 16 + pgvector, RabbitMQ, and the Python consumer.
 
-**The sync/async boundary is the core design decision.** User queries read only from the database and return in seconds. Fetching, LLM extraction and embedding happen in the background, so a slow or failing external API (Federal Register, OpenAI) never blocks or breaks a user-facing request.
+**The sync/async boundary is the core design decision.** User queries read only from the database and return in seconds. Fetching, LLM extraction and embedding happen in the background, so a slow or failing external API (any of the three sources, or OpenAI) never blocks or breaks a user-facing request.
 
 ---
 
 ## How a query works (synchronous path)
 
 1. `GET /api/agent/query?q=...` with an `X-API-Key` header (custom Spring Security filter, constant-time comparison).
-2. `AgentOrchestrationService` sends the question to `gpt-4o-mini` with three tool definitions and runs a bounded loop (max 4 rounds): the model chooses tools, the service executes them against PostgreSQL, results go back to the model as `tool` messages.
+2. `AgentOrchestrationService` sends the question to `gpt-4o-mini` with four tool definitions and runs a bounded loop (max 4 rounds): the model chooses tools, the service executes them against PostgreSQL, results go back to the model as `tool` messages.
 3. `search_market_events` embeds the query and runs a pgvector cosine search in two stages:
    - **Relevance gate:** similarity threshold (0.30), one result per source document (`DISTINCT ON (source_url)`).
    - **Ranking:** `score = similarity × (0.5 + 0.5 × 0.5^(age_days / 365))`. Recency only re-orders filings that already passed the gate, so a new but irrelevant filing can never outrank an older relevant one. The floor of 0.5 keeps older filings in play, since AD/CVD orders typically run for five years.
 
-   `get_market_events` returns a country's 10 most recent filings, newest first.
-4. A system prompt restricts the model to tool results, requires a publication date and source link for every filing mentioned, and asks it to lead with the most recent evidence.
+   `get_market_events` returns a country's 10 most recent filings, newest first. `get_tariff_rate` returns the base (MFN) duty for an ingredient from the USITC tariff schedule, explicitly labelled as excluding AD/CVD and Section 301 duties.
+4. A system prompt restricts the model to tool results, requires a publication date and source link for every filing mentioned, asks it to lead with the most recent evidence, and to report base duty and AD/CVD duties separately rather than adding them up. A failing tool returns an error message to the model instead of failing the request.
 5. The final answer is stored in `recommendations` together with the full tool-call trace (`reasoning_trace` JSONB): which tool, which arguments, in which round.
 
 ---
@@ -144,11 +145,19 @@ PENDING ──▶ SUMMARIZING ──▶ SUMMARIZED ──▶ EMBEDDED
 
 ---
 
-## Data (current)
+## Data sources
 
-- **Source:** U.S. Federal Register API, filtered to trade-remedy terms (antidumping, countervailing, tariff, duty, Section 301)
-- **100 filings → 122 rows** (one row per affected country) across **11 countries**, mostly from 7 AD/CVD cases (glycine, citric acid, xanthan gum, vanillin, MSG, erythritol, pea protein)
-- **27 ingredient records** across 5 categories, with category-specific specs in JSONB
+A U.S. import duty is set by three agencies. Each source covers one of them:
+
+| Source | Agency / what it answers | Access | Path through the pipeline |
+|---|---|---|---|
+| **Federal Register API** | Commerce AD/CVD filings: *is there a duty case on this product, and at what rate?* | JSON API, keyword search per ingredient + trade-remedy filter | LLM extraction → embedding |
+| **Regulations.gov API** | USTR Section 301 actions: *are country-wide tariffs being imposed or extended?* | JSON API (api.data.gov key), scoped to USTR, filtered to notices/rules with tariff terms | LLM extraction → embedding. Skipped if the same document is already held as a Federal Register filing (matched by FR document number). Title enriched with the FR abstract when available |
+| **USITC HTS REST API** | Base (MFN) duty per ingredient: *what is the normal tariff before any extra duties?* | JSON API, curated ingredient → 10-digit HTS mapping verified against the API | **No LLM** (already structured). Compared with a `tariff_rates` snapshot; an event is emitted on first observation and on any rate change. 10-digit statistical lines inherit the rate of their 8-digit tariff line |
+
+**Current volume:** 100 Federal Register filings (122 rows, one per affected country), 16 USTR documents, 10 HTS tariff lines, across 15+ countries; 27 ingredient records across 5 categories with category-specific specs in JSONB.
+
+Sources that were evaluated and rejected: USITC news releases (HTTP 403 for non-browser clients) and CBP CSMS via GovDelivery RSS (HTTP 406). Scraping sites that actively block clients would make a scheduled job unreliable.
 
 ---
 
@@ -207,9 +216,7 @@ Single AWS EC2 instance (t3.micro, Ubuntu 24.04):
 
 Not built yet (tracked in [KNOWN_ISSUES.md](KNOWN_ISSUES.md)):
 
-- [ ] **Two more data sources** (only the Federal Register today)
 - [ ] **Next.js + TypeScript dashboard**: query view with reasoning trace, pipeline status view
-- [ ] Additional agent tools: tariff summarization on demand, similar-customer lookup
 - [ ] Evaluation set for retrieval threshold and answer groundedness
 - [ ] Unit tests (pure functions and the auth filter first)
 

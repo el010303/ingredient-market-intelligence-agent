@@ -12,7 +12,6 @@
 
 | ID | Issue | Why it's next | Est. effort |
 |----|-------|---------------|-------------|
-| P1 | Third data source (Regulations.gov) not integrated yet | Federal Register + USITC HTS are live | 2–3 h |
 | F1 | No web dashboard | Next.js + TypeScript UI for queries, reasoning traces and pipeline status | 1–2 days |
 | T1 | No unit tests | Safety net for ranking, extraction parsing and auth | 2–3 h |
 
@@ -34,7 +33,6 @@
 
 | ID | Sev. | Issue | Current state / workaround | Planned fix |
 |----|------|-------|----------------------------|-------------|
-| P1 | 🔴 | Single data source (U.S. Federal Register API) | — | Add two more sources (candidates: World Bank, trade news RSS) |
 | P2 | 🟡 | USITC HTS data explored but not integrated | — | Deferred |
 | P3 | 🟡 | Data is concentrated in 7 AD/CVD cases, mostly China-origin | 100 filings → 122 rows (one row per affected country) across 11 countries | Broaden keyword set as more sources come online |
 | P4 | ⚪ | ~9 filings have no abstract; summaries fall back to the title | Lower-quality summaries for those rows | Optional: fetch full text |
@@ -50,6 +48,7 @@
 | P16 | 🟡 | Rows that exhaust retries stay `PENDING`; the scheduled run re-publishes them indefinitely | No `FAILED` transition yet | Track attempt count; mark `FAILED` after N runs and alert |
 | P17 | ⚪ | Legacy `embed_events.py` backfill writes embeddings without updating `status` | Kept only as a manual backfill tool | Update `status` in the script, or remove it |
 | P18 | ⚪ | DLQ has no tooling | Inspect and re-publish by hand in the management UI | Small re-drive script / endpoint |
+| P19 | ⚪ | Some multi-country USTR notices end up with country `Unknown` (e.g. tariff-rate quota allocations across many countries) | Still retrievable by semantic search | Allow a `Multiple` country value or a many-to-many country table |
 
 ## 3. Retrieval & Agent
 
@@ -82,6 +81,9 @@
 
 | Date | Issue | Fix |
 |------|-------|-----|
+| 2026-10-23 | **P1** — Only Federal Register as a source | Added Regulations.gov (USTR Section 301 notices, title enriched with FR abstract, cross-source dedup by FR document number) as source 3. Verified: 16 documents ingested, LLM-extracted countries, second run fetched 0 (dedup) |
+| 2026-10-23 | A failing tool (e.g. a DB permission error) turned the whole agent request into HTTP 500 | Tool calls are wrapped; errors go back to the model as a tool result so it can say the data is unavailable instead of guessing |
+| 2026-10-23 | Production migration created `tariff_rates` owned by `postgres` (run via `sudo -u postgres`), so the app got `permission denied`; per-line error isolation kept the job running | Ownership reassigned to the app user; migration header documents running as the app user |
 | 2026-10-23 | **P1 (partial)** — Only one data source | Added USITC HTS REST API as data source 2: base (MFN) duty per ingredient, change detection against a `tariff_rates` snapshot, baseline/change events sent straight to embedding (no LLM for structured data), 8-digit rate inheritance for 10-digit statistical suffixes, new `get_tariff_rate` agent tool |
 | 2026-10-22 | **R1** — No recency weighting; older filings outranked newer ones | Two-stage retrieval: similarity threshold as a relevance gate, then rank by `similarity × (0.5 + 0.5 × 0.5^(age_days/365))`. Per-country lookup returns the 10 most recent filings. Verified: glycine query now returns 2026 filings first |
 | 2026-10-22 | **R7** — Answers had no source links; no system prompt | Tools return `source_url`; new system prompt (with today's date) requires a date and `[title](url)` for every filing, tool-results-only answers, and a bottom line |

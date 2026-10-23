@@ -162,6 +162,18 @@ public class AgentOrchestrationService {
     }
 
     private String executeToolCall(String functionName, JsonNode args) {
+      // A failing tool must not fail the whole request: hand the error to the model as the tool
+      // result so it can tell the user that part of the data is unavailable.
+      try {
+        return dispatchTool(functionName, args);
+      } catch (RuntimeException e) {
+        System.out.println("Tool " + functionName + " failed: " + e.getMessage());
+        return "Tool error: " + functionName + " is temporarily unavailable. "
+            + "Tell the user this part of the data could not be retrieved; do not guess it.";
+      }
+    }
+
+    private String dispatchTool(String functionName, JsonNode args) {
       return switch (functionName) {
           case "get_ingredient_info" -> agentToolService.getIngredientInfoAsText(args.path("name").asText());
           case "get_market_events" -> agentToolService.getMarketEventsAsText(args.path("country").asText());
