@@ -82,6 +82,10 @@
 
 | Date | Issue | Fix |
 |------|-------|-----|
+| 2026-10-24 | Agent cited filings about other products: `get_market_events` filtered by country only, so a stevia question listed the xanthan-gum antidumping case; it also once queried "United States" instead of the exporting country | Tool takes the ingredient and returns two labeled groups (filings naming the ingredient / country-wide Section 301 actions, coverage marked unknown); "United States" rejected with a hint; empty result says "no filing in this data", not "no duties". Verified with `scripts/agent_smoke_test.sh` (5 questions incl. two positive cases) |
+| 2026-10-24 | Same question gave different tool calls and answers | `temperature: 0` + `seed`; prompt requires both market-event and tariff tools for risk/duty questions. 3 identical runs produced identical tool calls |
+| 2026-10-24 | Answers quoted column-2 (Cuba/North Korea) and special-program rates that don't apply to the sourcing countries | Removed from the tool output instead of relying on a prompt rule |
+| 2026-10-24 | Ask page lost the answer after visiting the data-sources page | Last question and answer kept in `sessionStorage` (per tab), wrapped in try/catch |
 | 2026-10-23 | **F1** — No web dashboard | Next.js 15 + TypeScript dashboard on Vercel: BFF route handler + Server Component (API key server-only), reasoning trail, data-sources page, ingestion run history |
 | 2026-10-23 | First Vercel deploy blocked: pinned Next.js 15.5.4 had CVE-2025-66478 (RCE) | Upgraded to patched 15.5.x; `npm audit` then flagged postcss and sharp, assessed as not reachable here and fixed via `overrides` instead of a major-version jump |
 | 2026-10-23 | **P1** — Only Federal Register as a source | Added Regulations.gov (USTR Section 301 notices, title enriched with FR abstract, cross-source dedup by FR document number) as source 3. Verified: 16 documents ingested, LLM-extracted countries, second run fetched 0 (dedup) |

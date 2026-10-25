@@ -14,7 +14,9 @@ export function describeToolCall(tool: string, rawArgs: string): string {
     case "get_tariff_rate":
       return `Checked the base tariff for ${v("ingredient") || "the ingredient"}`;
     case "get_market_events":
-      return `Read recent trade filings for ${v("country") || "the country"}`;
+      return v("ingredient")
+        ? `Read trade filings on ${v("ingredient")} from ${v("country") || "the country"}`
+        : `Read recent trade filings for ${v("country") || "the country"}`;
     case "search_market_events":
       return v("query") ? `Searched filings about “${v("query")}”` : "Searched trade filings";
     case "get_ingredient_info":

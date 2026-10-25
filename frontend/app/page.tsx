@@ -2,7 +2,7 @@
 // Ask page. Runs in the browser and holds no secrets: it calls our own /api/query route,
 // which forwards to Spring Boot with the API key on the server.
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import type { AgentResult, ToolCall } from "@/lib/types";
 import { prettyJson } from "@/lib/format";
@@ -28,6 +28,8 @@ function highlightRates(children: ReactNode): ReactNode {
   });
 }
 
+const LAST_ASK_KEY = "duty-desk:last-ask";
+
 const EXAMPLES = [
   "What duty do I pay importing glycine from India?",
   "Are there Section 301 tariff actions on imports from China?",
@@ -40,6 +42,22 @@ export default function AskPage() {
   const [result, setResult] = useState<AgentResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+
+  // Keep the last answer when the user visits another page and comes back.
+  // sessionStorage = this tab only, cleared when the tab closes; it can throw in private
+  // modes, so every access is wrapped and the page works without it.
+  useEffect(() => {
+    try {
+      const saved = sessionStorage.getItem(LAST_ASK_KEY);
+      if (!saved) return;
+      const { asked: q, result: r } = JSON.parse(saved) as { asked: string; result: AgentResult };
+      setQuestion(q);
+      setAsked(q);
+      setResult(r);
+    } catch {
+      /* nothing saved or storage unavailable: start empty */
+    }
+  }, []);
 
   async function ask(q: string) {
     const trimmed = q.trim();
@@ -54,6 +72,11 @@ export default function AskPage() {
       const body = await res.json();
       if (!res.ok) throw new Error(body.error ?? `Request failed (${res.status}).`);
       setResult(body as AgentResult);
+      try {
+        sessionStorage.setItem(LAST_ASK_KEY, JSON.stringify({ asked: trimmed, result: body }));
+      } catch {
+        /* storage unavailable: the answer still shows, it just won't survive navigation */
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "The request failed. Try again.");
     } finally {

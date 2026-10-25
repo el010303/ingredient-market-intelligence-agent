@@ -3,7 +3,6 @@ package com.marketintel.marketintelligenceagent;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
-import java.util.Comparator;
 import java.util.List;
 
 @Service
@@ -64,29 +63,101 @@ public class AgentToolService {
         return sb.toString();
     }
 
-    public String getMarketEventsAsText(String country) {
-        // Most recent first, capped: a country can have dozens of filings,
-        // and sending all of them would bury the current ones in the context window.
-        List<MarketEvent> list = getMarketEvents(country).stream()
-                .sorted(Comparator.comparing(MarketEvent::getEventDate,
-                        Comparator.nullsLast(Comparator.reverseOrder())))
-                .limit(MAX_EVENTS_PER_COUNTRY)
-                .toList();
-        if (list.isEmpty()) {
-            return "No market events found for country: " + country;
+    static final int MAX_COUNTRY_WIDE_ACTIONS = 3;
+
+    /**
+     * Filings for one country, split into two clearly labeled groups so the model cannot
+     * present an unrelated product's case as relevant to the ingredient being asked about:
+     *  1) ingredient-specific: AD/CVD and other filings whose title or summary names the ingredient
+     *  2) country-wide: USTR Section 301 actions that apply to many products from the country;
+     *     whether they cover this ingredient's HTS line is NOT known to this system.
+     * Without an ingredient, the newest filings for the country are returned, each with its product named.
+     */
+    public String getMarketEventsAsText(String country, String ingredient) {
+        // Every filing here is a U.S. action ON imports from a foreign country, so "United States"
+        // is never a valid value. The model sometimes confuses importer and exporter.
+        if (country == null || country.isBlank()
+                || country.trim().matches("(?i)(the\\s+)?(united states( of america)?|usa?|u\\.s\\.(a\\.)?)")) {
+            return "Invalid country: '" + country + "'. Pass the EXPORTING country the ingredient is imported from"
+                + " (for example 'China' or 'India'), not the United States. If unsure, call get_ingredient_info"
+                + " and use its origin.";
         }
         StringBuilder sb = new StringBuilder();
-        for (MarketEvent e : list) {
-            sb.append("- ").append(e.getTitle())
-              .append(" | published: ").append(e.getEventDate())
-              .append(" | summary: ").append(e.getLlmSummary())
-              .append(" | old rate: ").append(e.getExtractOldRate())
-              .append(" | new rate: ").append(e.getExtractNewRate())
-              .append(" | effective: ").append(e.getEffectiveDate())
-              .append(" | source: ").append(e.getSourceUrl())
-              .append("\n");
+        boolean hasIngredient = ingredient != null && !ingredient.isBlank();
+
+        if (hasIngredient) {
+            String like = "%" + ingredient.trim() + "%";
+            List<String> specific = jdbcTemplate.query("""
+                    SELECT title, event_date, llm_summary, extract_old_rate, extract_new_rate,
+                           effective_date, source_url
+                    FROM market_events
+                    WHERE lower(country) = lower(?)
+                      AND COALESCE(event_type, '') NOT LIKE 'hts_rate%'
+                      AND COALESCE(event_type, '') <> 'trade_policy_ustr'
+                      AND (title ILIKE ? OR llm_summary ILIKE ?)
+                    ORDER BY event_date DESC NULLS LAST
+                    LIMIT ?
+                    """,
+                (rs, i) -> formatEventLine(rs),
+                country, like, like, MAX_EVENTS_PER_COUNTRY);
+            sb.append("INGREDIENT-SPECIFIC filings for ").append(ingredient).append(" from ").append(country).append(":\n");
+            if (specific.isEmpty()) {
+                sb.append("- None. No antidumping, countervailing or other product-specific filing in this system names ")
+                  .append(ingredient).append(". This does NOT mean no such duties exist: this system tracks a")
+                  .append(" limited set of filings. Report it as 'no filing in this data', not as 'no duties'.\n");
+            } else {
+                specific.forEach(line -> sb.append(line).append("\n"));
+            }
+        } else {
+            List<String> recent = jdbcTemplate.query("""
+                    SELECT title, event_date, llm_summary, extract_old_rate, extract_new_rate,
+                           effective_date, source_url
+                    FROM market_events
+                    WHERE lower(country) = lower(?)
+                      AND COALESCE(event_type, '') NOT LIKE 'hts_rate%'
+                      AND COALESCE(event_type, '') <> 'trade_policy_ustr'
+                    ORDER BY event_date DESC NULLS LAST
+                    LIMIT ?
+                    """,
+                (rs, i) -> formatEventLine(rs),
+                country, MAX_EVENTS_PER_COUNTRY);
+            sb.append("Most recent product-specific filings for ").append(country)
+              .append(" (each applies only to the product named in its title):\n");
+            if (recent.isEmpty()) {
+                sb.append("- None.\n");
+            } else {
+                recent.forEach(line -> sb.append(line).append("\n"));
+            }
+        }
+
+        List<String> countryWide = jdbcTemplate.query("""
+                SELECT title, event_date, llm_summary, extract_old_rate, extract_new_rate,
+                       effective_date, source_url
+                FROM market_events
+                WHERE lower(country) = lower(?)
+                  AND event_type = 'trade_policy_ustr'
+                ORDER BY event_date DESC NULLS LAST
+                LIMIT ?
+                """,
+            (rs, i) -> formatEventLine(rs),
+            country, MAX_COUNTRY_WIDE_ACTIONS);
+        if (!countryWide.isEmpty()) {
+            sb.append("COUNTRY-WIDE trade actions for ").append(country)
+              .append(" (Section 301 / USTR). These apply to lists of products; this system does NOT know")
+              .append(" whether a given ingredient's HTS line is covered:\n");
+            countryWide.forEach(line -> sb.append(line).append("\n"));
         }
         return sb.toString();
+    }
+
+    private String formatEventLine(java.sql.ResultSet rs) throws java.sql.SQLException {
+        return "- " + rs.getString("title")
+            + " | published: " + rs.getDate("event_date")
+            + " | summary: " + rs.getString("llm_summary")
+            + " | old rate: " + rs.getObject("extract_old_rate")
+            + " | new rate: " + rs.getObject("extract_new_rate")
+            + " | effective: " + rs.getDate("effective_date")
+            + " | source: " + rs.getString("source_url");
     }
 
     public String searchMarketEventsAsText(String query) {
@@ -144,8 +215,8 @@ public class AgentToolService {
                 + " | HTS: " + rs.getString("hts_code")
                 + " (" + rs.getString("description") + ")"
                 + " | general (MFN) rate: " + rs.getString("general_rate")
-                + " | column-2 rate: " + rs.getString("other_rate")
-                + " | special programs: " + rs.getString("special_rate")
+                // Column-2 (Cuba, North Korea) and special-program rates are left out on purpose:
+                // they don't apply to the sourcing countries here, and the model kept quoting them.
                 + " | checked: " + rs.getObject("fetched_at")
                 + " | source: " + HtsRateFetcher.SEARCH_PAGE + rs.getString("hts_code"),
             ingredient);

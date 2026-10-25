@@ -36,6 +36,12 @@ public class AgentOrchestrationService {
 
             Rules:
             - Use ONLY facts returned by the tools. If the tools return nothing relevant, say so plainly.
+            - A product-specific filing applies only to the product named in its title. Never present a filing about a different product as relevant to the ingredient asked about.
+            - Country-wide actions (Section 301) may or may not cover the ingredient. Say that coverage is not confirmed by this data; never guess whether they apply.
+            - If there are no filings that name the ingredient, say "no filing in this data names <ingredient>". Never claim there are no restrictions or no risk: the data does not cover everything.
+            - If country-wide actions (Section 301) exist for the country, always mention them, even when no ingredient-specific filing exists.
+            - For questions about the risk, duty or cost of an ingredient, call both get_market_events (with the ingredient) and get_tariff_rate.
+            - If the user names no country, call get_ingredient_info first and use its origin country; say that you assumed it.
             - For every filing you mention, include its publication date and its source as a markdown link: [title](url).
             - Lead with the most recent filings. If an older filing in the same case has been followed by a newer one, say that the newer one supersedes it.
             - Do not invent tariff rates, dates, outcomes, prices or trends that are not in the tool results.
@@ -63,11 +69,12 @@ public class AgentOrchestrationService {
                 "type": "function",
                 "function": {
                   "name": "get_market_events",
-                  "description": "Get tariff and market events for a given country. Call this after get_ingredient_info if you need to assess tariff or market risk.",
+                  "description": "Get trade filings for a country. Pass the ingredient whenever the question is about one: the result separates filings that name that ingredient from country-wide Section 301 actions. Call this after get_ingredient_info if you need to assess tariff or market risk.",
                   "parameters": {
                     "type": "object",
                     "properties": {
-                      "country": {"type": "string", "description": "The country name, e.g. 'China'"}
+                      "country": {"type": "string", "description": "The EXPORTING country the goods come from, e.g. 'China'. Never 'United States': every filing is a U.S. action on imports."},
+                      "ingredient": {"type": "string", "description": "The ingredient the question is about, e.g. 'Glycine'. Optional but strongly recommended."}
                     },
                     "required": ["country"]
                   }
@@ -179,7 +186,8 @@ public class AgentOrchestrationService {
     private String dispatchTool(String functionName, JsonNode args) {
       return switch (functionName) {
           case "get_ingredient_info" -> agentToolService.getIngredientInfoAsText(args.path("name").asText());
-          case "get_market_events" -> agentToolService.getMarketEventsAsText(args.path("country").asText());
+          case "get_market_events" -> agentToolService.getMarketEventsAsText(
+                  args.path("country").asText(), args.path("ingredient").asText());
           case "search_market_events" -> agentToolService.searchMarketEventsAsText(args.path("query").asText());
           case "get_tariff_rate" -> agentToolService.getTariffRateAsText(args.path("ingredient").asText());
           default -> "Unknown tool: " + functionName;
@@ -200,6 +208,10 @@ public class AgentOrchestrationService {
         requestBody.set("messages", messages);
         requestBody.set("tools", jsonMapper.readTree(TOOLS_DEFINITION));
         requestBody.put("tool_choice", "auto");
+        // Same question -> (nearly) the same tool calls and answer. temperature 0 removes sampling
+        // randomness; seed asks OpenAI for best-effort repeatability. Not a hard guarantee.
+        requestBody.put("temperature", 0);
+        requestBody.put("seed", 42);
 
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
