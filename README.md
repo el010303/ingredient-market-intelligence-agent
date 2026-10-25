@@ -14,7 +14,7 @@ An LLM agent that answers ingredient-sourcing questions ("what's the tariff risk
 1. **Reliable async pipeline, not just "uses a queue."** Ingestion → LLM extraction → embedding runs through RabbitMQ with explicit row status, atomic claims via conditional `UPDATE`, retries with backoff, a dead-letter queue, and a scheduled reconciler for crashed workers. I verified each guarantee with fault injection. → [Ingestion pipeline](#ingestion-pipeline-asynchronous-path)
 2. **Idempotency chosen by cost.** The expensive LLM step claims work before running; the cheap embedding step writes conditionally with no claim. → [ADR-006](#adr-006-choose-idempotency-by-the-cost-of-repeating-a-step)
 3. **A bug that only appeared on one machine.** The stale-work reconciler silently matched nothing because a zone-less `TIMESTAMP` column was written from sessions in different time zones. Fixed with `TIMESTAMPTZ` and the database as the single clock. → [ADR-007](#adr-007-one-clock-for-pipeline-timestamps-timestamptz-written-by-the-database)
-4. **LLM output treated as untrusted input.** Structured extraction returns `null` instead of guessing, and real filings forced handling for code fences, multi-country notices, issuing-vs-affected country confusion and inconsistent names. Every agent answer is stored with its full tool-call trace. → [LLM extraction](#llm-extraction)
+4. **LLM output treated as untrusted input.** Structured extraction returns `null` instead of guessing, and real filings forced handling for code fences, multi-country notices, issuing-vs-affected country confusion and inconsistent names. Every agent answer is stored with its full tool-call trace. On the answer side, the agent cannot cite another product's case as evidence: filing results are split into those that name the ingredient and country-wide actions marked "coverage unknown", and rules the model kept ignoring were moved out of the prompt and into the data it sees. Checked with a scripted smoke test, including positive cases. → [LLM extraction](#llm-extraction), [Query path](#how-a-query-works-synchronous-path)
 5. **Three sources, each handled the way its data deserves.** Unstructured legal text (Federal Register, Regulations.gov) goes through LLM extraction; the structured USITC tariff API skips the LLM entirely and is diffed against a snapshot to emit change events. Documents published in both Regulations.gov and the Federal Register are deduplicated by FR document number. → [Data sources](#data-sources)
 6. **The API key never reaches the browser.** The Next.js dashboard is a backend-for-frontend: the interactive page calls its own route handler, which adds the key server-side; the status page is a Server Component. The key module is marked `server-only`, so importing it from browser code fails the build. → [Dashboard](#dashboard)
 7. **Production basics done properly.** Secrets never in the repo, generated server-side and never printed. Idempotent provisioning script. Rollback-safe JAR swaps. systemd recovery verified with a reboot. → [Deployment](#deployment)
@@ -100,8 +100,8 @@ The dashboard runs on Vercel; everything else runs on one EC2 instance: Spring B
    - **Relevance gate:** similarity threshold (0.30), one result per source document (`DISTINCT ON (source_url)`).
    - **Ranking:** `score = similarity × (0.5 + 0.5 × 0.5^(age_days / 365))`. Recency only re-orders filings that already passed the gate, so a new but irrelevant filing can never outrank an older relevant one. The floor of 0.5 keeps older filings in play, since AD/CVD orders typically run for five years.
 
-   `get_market_events` returns a country's 10 most recent filings, newest first. `get_tariff_rate` returns the base (MFN) duty for an ingredient from the USITC tariff schedule, explicitly labelled as excluding AD/CVD and Section 301 duties.
-4. A system prompt restricts the model to tool results, requires a publication date and source link for every filing mentioned, asks it to lead with the most recent evidence, and to report base duty and AD/CVD duties separately rather than adding them up. A failing tool returns an error message to the model instead of failing the request.
+   `get_market_events(country, ingredient)` returns two labelled groups: filings whose title or summary names the ingredient (newest first, up to 10), and the latest country-wide Section 301 actions, marked as not confirmed to cover the ingredient. With no matching filing it says "no filing in this data names X", not "no duties". It rejects "United States" as the country (every filing is a U.S. action *on* imports), which the model sometimes confused. `get_tariff_rate` returns the base (MFN) duty for an ingredient from the USITC tariff schedule, explicitly labelled as excluding AD/CVD and Section 301 duties; column-2 and special-program rates are left out because they don't apply to the sourcing countries and the model kept quoting them.
+4. A system prompt restricts the model to tool results, requires a publication date and source link for every filing mentioned, asks it to lead with the most recent evidence, and to report base duty and AD/CVD duties separately rather than adding them up. It must not present a filing about another product as relevant, must not guess whether a Section 301 action covers the ingredient, and must call both the filings and tariff tools for any risk or duty question. Requests use `temperature: 0` and a fixed `seed`, so the same question gives the same tool calls. A failing tool returns an error message to the model instead of failing the request.
 5. The final answer is stored in `recommendations` together with the full tool-call trace (`reasoning_trace` JSONB): which tool, which arguments, in which round.
 
 ---
@@ -170,10 +170,10 @@ Next.js 15 (App Router) + TypeScript in [`frontend/`](frontend), deployed on Ver
 
 | Page | Rendering | What it shows |
 |---|---|---|
-| **Ask** (`/`) | Client Component → `/api/query` route handler → Spring Boot | The answer with every duty figure highlighted and linked to its source, plus "How this answer was built": each round of tool calls in plain language, the source it read, the arguments, and a preview of the data returned |
-| **Data sources** (`/pipeline`) | Server Component, rendered on the server | Documents per source and agency, base tariff per ingredient, recent ingestion runs (from `ingestion_runs`) |
+| **Ask** (`/`) | Server Component loads the tracked tariff lines; the interactive part is a Client Component that calls the `/api/query` route handler → Spring Boot | A question box, ingredient tags (name, base duty, HTS line; one click asks about it), and the answer with every duty figure highlighted and linked to its source, plus "How this answer was checked": each lookup in plain language with the source it read; the raw data is one click away. The last answer is kept per browser tab (`sessionStorage`) |
+| **Data sources** (`/pipeline`) | Server Component, rendered on the server | Documents per source and agency, base tariff per ingredient, recent ingestion runs (from `ingestion_runs`). Times are shown in U.S. Eastern with the zone named, since the server renders in UTC |
 
-- **Secrets stay server-side.** `BACKEND_API_KEY` is read only in `lib/backend.ts`, which imports `server-only`; the build output marks both key-using routes as server-rendered (`ƒ`) and the ask page as static (`○`).
+- **Secrets stay server-side.** `BACKEND_API_KEY` is read only in `lib/backend.ts`, which imports `server-only`; the build output marks every key-using route as server-rendered (`ƒ`).
 - **Cost guard.** Each question triggers paid LLM calls, so the proxy validates input length and rate-limits per client (10 questions per 10 minutes). The limiter is in-memory, so on serverless it is per instance; a shared store (e.g. Redis) would be needed for a hard guarantee. See [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
 - **Dependencies are pinned and audited.** The first deploy was blocked by Vercel for a vulnerable Next.js version (CVE-2025-66478); upgraded to a patched 15.5.x and overrode two vulnerable transitive packages instead of jumping a major version.
 
@@ -263,6 +263,7 @@ python embed_consumer.py
 # 5. Trigger one ingestion run (local profile only), then query
 curl http://localhost:8080/test/run-ingestion
 curl -H "X-API-Key: <your local key>" "http://localhost:8080/api/agent/query?q=glycine%20tariff%20risk"
+./scripts/agent_smoke_test.sh    # 5 questions (incl. positive cases) + a repeatability check; prints each tool call and answer
 
 # 6. Dashboard (frontend/.env.local: BACKEND_URL, BACKEND_API_KEY; see .env.local.example)
 cd frontend && npm install && npm run dev    # http://localhost:3000
@@ -288,6 +289,7 @@ embedding-script/embed_consumer.py    # Python embed consumer
 frontend/                             # Next.js + TypeScript dashboard (BFF)
 db/                                   # SQL migrations
 deploy/setup_pipeline.sh              # idempotent EC2 provisioning
+scripts/agent_smoke_test.sh           # end-to-end agent check against a running backend
 KNOWN_ISSUES.md                       # known limitations and changelog
 ```
 
