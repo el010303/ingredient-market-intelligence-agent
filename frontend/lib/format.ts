@@ -2,7 +2,19 @@ export function formatTime(value: string | number | null | undefined): string {
   if (value === null || value === undefined || value === "") return "—";
   const d = new Date(value);
   if (Number.isNaN(d.getTime())) return String(value);
-  return d.toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" });
+  // The pipeline page is a Server Component, so this runs on Vercel, whose clock is UTC.
+  // Without an explicit zone it printed UTC times with no label (a 1:39 PM PT run showed as "8:39 PM").
+  // Use the zone the ingestion schedule is defined in, and always print the zone name.
+  return d.toLocaleString("en-US", {
+    // dateStyle/timeStyle can't be combined with timeZoneName, so spell the parts out
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZone: "America/New_York",
+    timeZoneName: "short",
+  });
 }
 
 export function formatDate(value: string | null | undefined): string {
