@@ -34,11 +34,15 @@ export default async function PipelinePage() {
   const status = await loadStatus();
   if (!status) {
     return (
-      <section className="intro">
-        <h1>Where the answers come from</h1>
-        <p className="notice notice-error">
-          The data service didn&apos;t respond. Check that the backend is running, then reload this page.
-        </p>
+      <section className="hero hero-short">
+        <div className="hero-inner">
+          <div className="hero-copy">
+            <h1>Where the answers come from</h1>
+            <p className="notice notice-error">
+              The data service didn&apos;t respond. Check that the backend is running, then reload this page.
+            </p>
+          </div>
+        </div>
       </section>
     );
   }
@@ -52,18 +56,24 @@ export default async function PipelinePage() {
 
   return (
     <>
-      <section className="intro">
-        <h1>Where the answers come from</h1>
-        <p className="lede">
-          A U.S. import duty is set by three agencies. Each one publishes to a different place, and the
-          agent reads all three. New documents are collected every weekday morning.
-        </p>
-        <p className="health">
-          {searchable === total
-            ? `All ${total} records are searchable.`
-            : `${searchable} of ${total} records are searchable; ${total - searchable} are still being processed.`}
-        </p>
+      <section className="hero hero-short">
+        <div className="hero-inner">
+          <div className="hero-copy">
+            <h1>Where the answers come from</h1>
+            <p className="lede">
+              A U.S. import duty is set by three agencies. Each one publishes in a different place, and the
+              agent reads all three. New documents are collected every weekday morning.
+            </p>
+            <p className="health">
+              {searchable === total
+                ? `All ${total} records are searchable.`
+                : `${searchable} of ${total} records are searchable; ${total - searchable} are still being processed.`}
+            </p>
+          </div>
+        </div>
       </section>
+
+      <div className="below">
 
       <section className="sources" aria-label="Sources">
         {status.eventsBySource.map((s) => {
@@ -89,6 +99,7 @@ export default async function PipelinePage() {
           General (most-favored-nation) rate from the Harmonized Tariff Schedule. Antidumping, countervailing
           and Section 301 duties are charged on top.
         </p>
+        <div className="table-card">
         <table className="rates">
           <thead>
             <tr>
@@ -109,12 +120,13 @@ export default async function PipelinePage() {
                 <td className="col-bar">
                   <span className="bar" style={{ width: `${((t.value ?? 0) / maxRate) * 100}%` }} />
                 </td>
-                <td><code>{t.hts_code}</code></td>
+                <td className="hts">{t.hts_code}</td>
                 <td className="muted">{formatTime(t.fetched_at)}</td>
               </tr>
             ))}
           </tbody>
         </table>
+        </div>
       </section>
 
       <section className="block">
@@ -135,6 +147,7 @@ export default async function PipelinePage() {
           </ul>
         )}
       </section>
+      </div>
     </>
   );
 }
