@@ -1,4 +1,4 @@
-### Similarity of labeled pairs by grade
+### Similarity of labeled pairs by grade (tuning queries)
 
 | Grade | Pairs | Min | 10th pct | Median | 90th pct | Max |
 |---|---|---|---|---|---|---|
@@ -17,3 +17,13 @@
 | 0.50 | 85% | 69% |
 | 0.55 | 70% | 84% |
 | 0.60 | 57% | 99% |
+
+### Agent-sent queries (`agent_query`, not used for tuning)
+
+| Grade | Pairs | Min | 10th pct | Median | 90th pct | Max |
+|---|---|---|---|---|---|---|
+| 2 | 18 | 0.30 | 0.31 | 0.33 | 0.45 | 0.46 |
+| 1 | 0 | – | – | – | – | – |
+| 0 | 4 | 0.30 | 0.30 | 0.40 | 0.42 | 0.42 |
+
+The production gate (0.45) keeps 6% of their relevant pairs.

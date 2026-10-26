@@ -1,5 +1,6 @@
 Retrieval eval, top-5, as of 2026-10-25. Answerable = at least one grade-2 filing in the pool.
 Recency = weight of the age factor (0.00 = off).
+Config tables: the 17 hand-written tuning queries. Agent-sent queries (`agent_query`) appear only in the per-query table.
 
 ### All event types (behaviour before tuning)
 
@@ -70,5 +71,9 @@ Recency = weight of the age factor (0.00 = off).
 | q13 stevia tariff risk China | no_answer | 5 | 0 / 0 | – | 5 |
 | q14 gelatin import duty Brazil | no_answer | 5 | 0 / 0 | – | 3 |
 | q15 sucralose antidumping China | no_answer | 5 | 0 / 0 | – | 5 |
-| q16 ascorbic acid vitamin C duties | no_answer | 0 | 0 / 0 | – | 0 |
+| q16 ascorbic acid vitamin C duties | no_answer | 3 † | 0 / 0 | – | 3 |
 | q17 coffee bean tariffs Colombia | out_of_domain | 5 | 0 / 0 | – | 5 |
+| q18 amino acids supplements | agent_query | 3 † | 3 / 9 | 0.72 | 0 |
+| q19 dumping cases food thickeners | agent_query | 1 | 1 / 7 | 0.34 | 0 |
+
+† Nothing passed the gate. Production then returns the 3 closest filings, labeled as low confidence; those are what is scored here.
