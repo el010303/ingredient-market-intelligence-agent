@@ -27,6 +27,8 @@ for c in r["toolCalls"]:
         print("  FAIL  %s returned an error (check the backend log)" % c["tool"])
 print()
 print(r["answer"])
+if r["answer"].startswith("Agent could not complete"):
+    print("  FAIL  no answer (tool-call round limit reached and the final answer call failed)")
 '
   echo
 }
@@ -90,6 +92,9 @@ search_check "Which food additives have had recent antidumping or countervailing
 # which can only return near-misses (low confidence, or other products that passed the gate). Read
 # the answer: it must say no filing is about vitamins and must not present another product's case.
 ask "Which vitamins have had antidumping or countervailing duty cases?"
+# Used to spend all 4 tool rounds on lookups and return no answer (R19). Must now answer, saying
+# the data has no filing on ascorbic acid rather than guessing.
+ask "Are there duties on ascorbic acid (vitamin C) imports?"
 
 echo "=================== consistency: same question 3 times ==================="
 for i in 1 2 3; do

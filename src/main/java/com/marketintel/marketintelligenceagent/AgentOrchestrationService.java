@@ -129,7 +129,7 @@ public class AgentOrchestrationService {
         messages.add(userMessage);
 
         for (int round = 0; round < MAX_ROUNDS; round++) {
-            JsonNode response = callOpenAiWithTools(messages);
+            JsonNode response = callOpenAiWithTools(messages, "auto");
             JsonNode message = response.path("choices").get(0).path("message");
             JsonNode toolCalls = message.path("tool_calls");
 
@@ -167,8 +167,38 @@ public class AgentOrchestrationService {
                 messages.add(toolMessage);
             }
         }
-        return new AgentResult(
-                "Agent could not complete the query within the allowed number of tool-call rounds.", toolTrace);
+        // Out of tool rounds: one last call with tools disabled, so the model answers from the
+        // results it already has instead of the user getting no answer (R19).
+        ObjectNode limitNote = jsonMapper.createObjectNode();
+        limitNote.put("role", "system");
+        limitNote.put("content", "Tool-call limit reached. Answer now using only the tool results above. "
+                + "Say plainly what the data does not show; do not guess." + notCheckedNote(toolTrace));
+        messages.add(limitNote);
+        JsonNode content = callOpenAiWithTools(messages, "none").path("choices").get(0).path("message").path("content");
+        String answer = content.isMissingNode() || content.isNull() ? "" : content.asText();
+        if (answer.isBlank()) {
+            answer = "Agent could not complete the query within the allowed number of tool-call rounds.";
+        }
+        saveRecommendation(userQuery, answer, toolTrace);
+        return new AgentResult(answer, toolTrace);
+    }
+
+    // Which kinds of data the model never looked up before the round limit. Named explicitly so
+    // the answer says "not checked" instead of "none found" (absence of a lookup is not absence of data).
+    private static String notCheckedNote(List<Map<String, Object>> toolTrace) {
+        List<String> called = toolTrace.stream().map(t -> String.valueOf(t.get("tool"))).toList();
+        List<String> missing = new ArrayList<>();
+        if (!called.contains("get_market_events") && !called.contains("search_market_events")) {
+            missing.add("trade filings (antidumping, countervailing, Section 301)");
+        }
+        if (!called.contains("get_tariff_rate")) {
+            missing.add("the base tariff rate");
+        }
+        if (missing.isEmpty()) {
+            return "";
+        }
+        return " These were NOT checked: " + String.join("; ", missing) + ". Tell the user they were not"
+                + " checked, and do not say none exist.";
     }
 
     private String executeToolCall(String functionName, JsonNode args) {
@@ -202,12 +232,13 @@ public class AgentOrchestrationService {
         rec.setReasoningTrace(Map.of("tool_calls", toolTrace));
         recommendationRepository.save(rec);
     }
-    private JsonNode callOpenAiWithTools(ArrayNode messages) {
+    // toolChoice: "auto" lets the model call tools; "none" forces a text answer.
+    private JsonNode callOpenAiWithTools(ArrayNode messages, String toolChoice) {
         ObjectNode requestBody = jsonMapper.createObjectNode();
         requestBody.put("model", "gpt-4o-mini");
         requestBody.set("messages", messages);
         requestBody.set("tools", jsonMapper.readTree(TOOLS_DEFINITION));
-        requestBody.put("tool_choice", "auto");
+        requestBody.put("tool_choice", toolChoice);
         // Same question -> (nearly) the same tool calls and answer. temperature 0 removes sampling
         // randomness; seed asks OpenAI for best-effort repeatability. Not a hard guarantee.
         requestBody.put("temperature", 0);
