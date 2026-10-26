@@ -1,0 +1,22 @@
+{
+  "_comment": "Retrieval eval queries for search_market_events. 'terms' are the product names a relevant filing must mention; 'country' is the exporting country the query asks about (null = any). 'intent' drives the suggested grade only; the final grade is always a human decision in labels.csv.",
+  "queries": [
+    {"id": "q01", "category": "exact",        "intent": "product",      "text": "glycine tariff risk from India",                  "terms": ["glycine"],                              "country": "India"},
+    {"id": "q02", "category": "exact",        "intent": "product",      "text": "antidumping duty on glycine from China",          "terms": ["glycine"],                              "country": "China"},
+    {"id": "q03", "category": "exact",        "intent": "product",      "text": "countervailing duty on xanthan gum from China",   "terms": ["xanthan gum"],                          "country": "China"},
+    {"id": "q04", "category": "exact",        "intent": "product",      "text": "citric acid import duties",                       "terms": ["citric acid", "citrate"],               "country": null},
+    {"id": "q05", "category": "exact",        "intent": "product",      "text": "vanillin from China trade remedy",                "terms": ["vanillin"],                             "country": "China"},
+    {"id": "q06", "category": "exact",        "intent": "product",      "text": "monosodium glutamate antidumping Indonesia",      "terms": ["monosodium glutamate", "msg"],          "country": "Indonesia"},
+    {"id": "q07", "category": "exact",        "intent": "product",      "text": "pea protein imports from China duties",           "terms": ["pea protein"],                          "country": "China"},
+    {"id": "q08", "category": "abbreviation", "intent": "product",      "text": "MSG tariff China",                                "terms": ["monosodium glutamate", "msg"],          "country": "China"},
+    {"id": "q09", "category": "paraphrase",   "intent": "product",      "text": "amino acid supplement duties from India",         "terms": ["glycine"],                              "country": "India"},
+    {"id": "q10", "category": "paraphrase",   "intent": "product",      "text": "food thickener dumping case China",               "terms": ["xanthan gum"],                          "country": "China"},
+    {"id": "q11", "category": "country_wide", "intent": "country_wide", "text": "Section 301 tariffs on Chinese imports",          "terms": [],                                       "country": "China"},
+    {"id": "q12", "category": "country_wide", "intent": "country_wide", "text": "recent U.S. trade actions affecting India",       "terms": [],                                       "country": "India"},
+    {"id": "q13", "category": "no_answer",    "intent": "product",      "text": "stevia tariff risk China",                        "terms": ["stevia", "steviol"],                    "country": "China"},
+    {"id": "q14", "category": "no_answer",    "intent": "product",      "text": "gelatin import duty Brazil",                      "terms": ["gelatin"],                              "country": "Brazil"},
+    {"id": "q15", "category": "no_answer",    "intent": "product",      "text": "sucralose antidumping China",                     "terms": ["sucralose"],                            "country": "China"},
+    {"id": "q16", "category": "no_answer",    "intent": "product",      "text": "ascorbic acid vitamin C duties",                  "terms": ["ascorbic acid", "vitamin c"],           "country": null},
+    {"id": "q17", "category": "out_of_domain","intent": "product",      "text": "coffee bean tariffs Colombia",                    "terms": ["coffee"],                               "country": "Colombia"}
+  ]
+}

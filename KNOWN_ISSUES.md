@@ -1,6 +1,6 @@
 # Known Issues & Limitations
 
-> Last updated: 2026-10-22 (late)
+> Last updated: 2026-10-25
 >
 > This file tracks issues that are **known but not yet fixed**. When an issue is resolved, it moves to the [Changelog](#changelog) at the bottom with a note on how it was fixed.
 >
@@ -14,6 +14,7 @@
 |----|-------|---------------|-------------|
 | D1 | API served over plain HTTP; the Vercel → EC2 hop carries the API key unencrypted | Highest remaining security gap now that the dashboard is public | 2–3 h |
 | T1 | No unit tests | Safety net for ranking, extraction parsing and auth | 2–3 h |
+| R13 | The similarity gate cannot separate relevant from irrelevant filings | Biggest remaining retrieval-quality gap; the eval set makes the fix measurable | 3–4 h |
 
 ---
 
@@ -49,22 +50,27 @@
 | P16 | 🟡 | Rows that exhaust retries stay `PENDING`; the scheduled run re-publishes them indefinitely | No `FAILED` transition yet | Track attempt count; mark `FAILED` after N runs and alert |
 | P17 | ⚪ | Legacy `embed_events.py` backfill writes embeddings without updating `status` | Kept only as a manual backfill tool | Update `status` in the script, or remove it |
 | P18 | ⚪ | DLQ has no tooling | Inspect and re-publish by hand in the management UI | Small re-drive script / endpoint |
-| P19 | ⚪ | Some multi-country USTR notices end up with country `Unknown` (e.g. tariff-rate quota allocations across many countries) | Still retrievable by semantic search | Allow a `Multiple` country value or a many-to-many country table |
+| P19 | 🟡 | A filing that names several countries is stored as one row per country; some multi-country USTR notices end up as `Unknown` or `Various Economies` | Search keeps one row per filing, so the country shown is whichever row is closest to the query; labeling found Section 301 actions covering China shown as Malaysia or Unknown | One row per filing in `market_events` plus an `event_countries(event_id, country)` table; embed once per filing; return all countries with `array_agg`. Also fixes R3 |
+| P20 | 🟡 | HTS rows store the placeholder `All (MFN)` in `country` | Every country filter has to remember to exclude it; the eval's first-pass labels treated it as a wrong country | Make `country` nullable and add an explicit `applies_to` column (`COUNTRY` / `ALL_MFN`) |
+| P21 | 🟡 | `event_type` depends on the source API, not the document: the same kind of Section 301 notice is `trade_policy_ustr` from Regulations.gov but `tariff_policy` from the Federal Register, and cross-source dedup keeps the Federal Register copy | `get_market_events` uses `event_type` to separate product filings from country-wide actions, so these notices land in the wrong group | Classify by issuing agency and content (USTR, "Section 301"), independent of the source |
+| P22 | 🟡 | Extraction can assign a country that is not in the filing: "Citric Acid ... From Canada and India" was stored as China | Found while labeling the eval set | Post-extraction check that the stored country appears in the title or abstract; extends P8 |
 
 ## 3. Retrieval & Agent
 
 | ID | Sev. | Issue | Current state / workaround | Planned fix |
 |----|------|-------|----------------------------|-------------|
-| R2 | 🟡 | Similarity threshold (0.30) is a heuristic | Not backed by an eval set | Tune against a ~20-query eval set |
-| R3 | 🟡 | `DISTINCT ON (source_url)` keeps one row per filing | Multi-country filings may surface the wrong country | `DISTINCT ON (source_url, country)` |
+| R3 | 🟡 | `DISTINCT ON (source_url)` keeps one row per filing | Multi-country filings may surface the wrong country | Fixed by the P19 data model. `DISTINCT ON (source_url, country)` was considered and rejected: one filing could fill several of the five result slots |
 | R4 | 🟡 | `get_ingredient_info` / `get_market_events` load all rows and filter in memory | Acceptable at current size | Repository queries |
 | R5 | 🟡 | Country lookup is exact-match and depends on normalization | Unnormalized variants are missed | Fixed together with P7 |
 | R6 | ⚪ | `query_type` is hard-coded; `recommended_options` stores free text | Works, but not structured | Intent classification + structured options |
 | R8 | 🟡 | Occasional over-inference (e.g. price trends not present in the data) | — | Stricter "tool results only" instruction + groundedness check |
-| R9 | 🟡 | No evaluation loop | Quality is judged by manual inspection | Small eval set with manual scoring |
+| R9 | 🟡 | No evaluation of answer quality (retrieval is evaluated in `eval/`) | Answers are judged by the smoke test and manual inspection | Groundedness check: every claim traceable to a tool result, scored on a small labeled set |
 | R10 | 🟡 | The agent does not reliably flag superseded filings (e.g. a preliminary result followed by the final result for the same review period) | Prompted to, but the model misses it from free text | Extract case, review period and stage (preliminary/final) as structured fields at summarization time; mark superseded rows in code |
 | R11 | 🔴 | Extraction can confuse the **period of review** with the **effective date** (e.g. a CVD review for POR 2024 stored as "effective 2024-01-01"); the agent then repeats it | Grounding rules can't catch wrong source data | Extract `period_of_review` and `effective_date` as separate fields with explicit definitions in the prompt; add labeled test cases |
 | R12 | ⚪ | The model sometimes omits the source link for the HTS base duty even though the tool returns it | — | Tighten the prompt or append citations in code from the tool trace |
+| R13 | 🟡 | The similarity gate cannot separate relevant from irrelevant filings: their similarities overlap between 0.43 and 0.60 | At the tuned gate (0.45), queries with no matching filing still get ~3.6 irrelevant results; the prompt forbids citing other products' filings | Add a second signal, e.g. require a keyword match on the product name or rerank the candidates; re-measure with `eval/` |
+| R14 | 🟡 | Semantic search barely distinguishes countries: "antidumping duty on glycine from China" ranks India filings first (nDCG@5 0.48 after tuning) | The agent is required to also call `get_market_events`, which filters by country | Accept an optional country argument in `search_market_events` and apply it as a SQL filter; re-measure with `eval/` |
+| R15 | 🟡 | Search results lack diversity: one case produces many similar filings, so "Which food additives have recent AD/CVD cases?" returned five citric-acid filings and the answer said the cases "primarily focus on citric acid", while xanthan gum, MSG, vanillin, glycine and pea protein also have recent cases | Precision@5 is 1.0 for such a query, so the eval does not catch it | Collapse results by product/case (keep the newest filing per case) or rerank with MMR; add list-style queries with a coverage metric to `eval/` |
 
 ## 4. Testing & Code Quality
 
@@ -82,6 +88,8 @@
 
 | Date | Issue | Fix |
 |------|-------|-----|
+| 2026-10-25 | **R2** — Similarity threshold (0.30) was a heuristic; **R9 (retrieval part)** — no eval set | Built `eval/`: 17 queries, 164 hand-graded pairs pooled across configurations. Found that the 0.30 gate removed nothing, so recency (weight 0.5) promoted new irrelevant filings. Gate raised to 0.45, recency weight lowered to 0.25: precision 0.60 → 0.82, recall@5 0.73 → 0.90, nDCG@5 0.78 → 0.93, newest relevant filing first 77% → 75%. See `eval/results.md` |
+| 2026-10-25 | HTS baseline snapshots are dated by fetch time, so recency ranked them as the newest documents and they appeared in unrelated queries | Excluded `hts_rate_baseline` from semantic search; the base duty is served by `get_tariff_rate`. Rate-change events are still searchable |
 | 2026-10-24 | Agent cited filings about other products: `get_market_events` filtered by country only, so a stevia question listed the xanthan-gum antidumping case; it also once queried "United States" instead of the exporting country | Tool takes the ingredient and returns two labeled groups (filings naming the ingredient / country-wide Section 301 actions, coverage marked unknown); "United States" rejected with a hint; empty result says "no filing in this data", not "no duties". Verified with `scripts/agent_smoke_test.sh` (5 questions incl. two positive cases) |
 | 2026-10-24 | Same question gave different tool calls and answers | `temperature: 0` + `seed`; prompt requires both market-event and tariff tools for risk/duty questions. 3 identical runs produced identical tool calls |
 | 2026-10-24 | Answers quoted column-2 (Cuba/North Korea) and special-program rates that don't apply to the sourcing countries | Removed from the tool output instead of relying on a prompt rule |

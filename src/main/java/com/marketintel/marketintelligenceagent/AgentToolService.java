@@ -13,13 +13,22 @@ public class AgentToolService {
     private final JdbcTemplate jdbcTemplate;
     private final EmbeddingService embeddingService;
 
-    // Retrieval ranking parameters.
-    // The similarity threshold is a relevance gate: it decides WHETHER a filing is relevant.
-    // Recency only re-orders filings that already passed the gate, so a brand-new but
-    // irrelevant filing can never outrank an older relevant one.
-    static final double SIMILARITY_THRESHOLD = 0.30;
+    // Retrieval ranking parameters, tuned with the labeled eval set in eval/ (see eval/results.md).
+    // The similarity threshold is a relevance gate: it decides WHETHER a filing is passed on.
+    // Recency then re-orders what passed. Recency can only be trusted to re-order relevant
+    // filings if the gate actually removes irrelevant ones: at 0.30 it removed none, and
+    // weight 0.5 let new irrelevant filings outrank older relevant ones (nDCG@5 0.78).
+    //   0.45: keeps 95% of relevant pairs, removes 44% of irrelevant ones. Relevant and
+    //         irrelevant similarities overlap (0.43-0.60), so a higher gate starts dropping
+    //         relevant filings; see KNOWN_ISSUES R13 for the next step (keyword signal).
+    //   0.25: keeps "newest relevant filing first" at 75% (vs 42% with recency off) while
+    //         losing little relevance (nDCG@5 0.93 vs 0.99).
+    static final double SIMILARITY_THRESHOLD = 0.45;
     static final double RECENCY_HALF_LIFE_DAYS = 365.0; // a filing's recency boost halves every year
-    static final double RECENCY_WEIGHT = 0.5;           // share of the score that depends on age
+    static final double RECENCY_WEIGHT = 0.25;          // share of the score that depends on age
+    // HTS baseline snapshots are dated by fetch time, so recency treated them as the newest
+    // documents in every query. The base duty is served by get_tariff_rate instead.
+    static final String EXCLUDED_FROM_SEARCH = "hts_rate_baseline";
     static final int MAX_RESULTS = 5;
     static final int MAX_EVENTS_PER_COUNTRY = 10;
 
@@ -179,6 +188,7 @@ public class AgentToolService {
                 FROM market_events
                 WHERE embedding IS NOT NULL
                   AND 1 - (embedding <=> ?::vector) > ?
+                  AND COALESCE(event_type, '') <> ?
                 ORDER BY source_url, embedding <=> ?::vector
             ) t
             ORDER BY score DESC
@@ -194,7 +204,7 @@ public class AgentToolService {
                 + " | source: " + rs.getString("source_url"),
             RECENCY_WEIGHT, RECENCY_WEIGHT,
             RECENCY_WEIGHT, RECENCY_WEIGHT, RECENCY_HALF_LIFE_DAYS,
-            queryVector, queryVector, SIMILARITY_THRESHOLD, queryVector,
+            queryVector, queryVector, SIMILARITY_THRESHOLD, EXCLUDED_FROM_SEARCH, queryVector,
             MAX_RESULTS);
         if (lines.isEmpty()) {
             return "No semantically relevant market events found.";

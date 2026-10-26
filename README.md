@@ -7,7 +7,8 @@ An LLM agent that answers ingredient-sourcing questions ("what's the tariff risk
 - **Problem:** Sourcing decisions depend on duties set by three different agencies: AD/CVD filings (Commerce, Federal Register), Section 301 actions (USTR) and base tariff rates (USITC). I did this analysis by hand in a previous role.
 - **Built:** Tool-calling agent (Spring Boot + OpenAI) · Next.js + TypeScript dashboard · ingestion from 3 external sources · pgvector retrieval in PostgreSQL · RabbitMQ pipeline with Java and Python consumers · API-key auth · scripted EC2 deployment
 - **Verified:** At-least-once delivery with idempotent consumers, proven by killing a consumer mid-flight · poison messages dead-lettered · automatic recovery after instance reboot
-- **Not yet:** HTTPS between the dashboard and the API, an evaluation set, unit tests. Tracked openly in [KNOWN_ISSUES.md](KNOWN_ISSUES.md)
+- **Measured:** retrieval evaluated on 17 hand-labeled queries; tuning the relevance gate and recency weight raised nDCG@5 from 0.78 to 0.93. → [Retrieval evaluation](#retrieval-evaluation)
+- **Not yet:** HTTPS between the dashboard and the API, an answer-quality (groundedness) evaluation, unit tests. Tracked openly in [KNOWN_ISSUES.md](KNOWN_ISSUES.md)
 
 ## Engineering highlights
 
@@ -17,7 +18,8 @@ An LLM agent that answers ingredient-sourcing questions ("what's the tariff risk
 4. **LLM output treated as untrusted input.** Structured extraction returns `null` instead of guessing, and real filings forced handling for code fences, multi-country notices, issuing-vs-affected country confusion and inconsistent names. Every agent answer is stored with its full tool-call trace. On the answer side, the agent cannot cite another product's case as evidence: filing results are split into those that name the ingredient and country-wide actions marked "coverage unknown", and rules the model kept ignoring were moved out of the prompt and into the data it sees. Checked with a scripted smoke test, including positive cases. → [LLM extraction](#llm-extraction), [Query path](#how-a-query-works-synchronous-path)
 5. **Three sources, each handled the way its data deserves.** Unstructured legal text (Federal Register, Regulations.gov) goes through LLM extraction; the structured USITC tariff API skips the LLM entirely and is diffed against a snapshot to emit change events. Documents published in both Regulations.gov and the Federal Register are deduplicated by FR document number. → [Data sources](#data-sources)
 6. **The API key never reaches the browser.** The Next.js dashboard is a backend-for-frontend: the interactive page calls its own route handler, which adds the key server-side; the status page is a Server Component. The key module is marked `server-only`, so importing it from browser code fails the build. → [Dashboard](#dashboard)
-7. **Production basics done properly.** Secrets never in the repo, generated server-side and never printed. Idempotent provisioning script. Rollback-safe JAR swaps. systemd recovery verified with a reboot. → [Deployment](#deployment)
+7. **Retrieval tuned against a labeled eval set, which overturned a design assumption.** The ranking was designed so that recency only re-orders filings that already passed a similarity gate. Measured on 17 labeled queries, the gate at 0.30 removed nothing, so recency was promoting new irrelevant filings. Re-tuned with the data: precision 0.60 → 0.82, nDCG@5 0.78 → 0.93. → [Retrieval evaluation](#retrieval-evaluation)
+8. **Production basics done properly.** Secrets never in the repo, generated server-side and never printed. Idempotent provisioning script. Rollback-safe JAR swaps. systemd recovery verified with a reboot. → [Deployment](#deployment)
 
 ## Example
 
@@ -97,12 +99,42 @@ The dashboard runs on Vercel; everything else runs on one EC2 instance: Spring B
 1. `GET /api/agent/query?q=...` with an `X-API-Key` header (custom Spring Security filter, constant-time comparison).
 2. `AgentOrchestrationService` sends the question to `gpt-4o-mini` with four tool definitions and runs a bounded loop (max 4 rounds): the model chooses tools, the service executes them against PostgreSQL, results go back to the model as `tool` messages.
 3. `search_market_events` embeds the query and runs a pgvector cosine search in two stages:
-   - **Relevance gate:** similarity threshold (0.30), one result per source document (`DISTINCT ON (source_url)`).
-   - **Ranking:** `score = similarity × (0.5 + 0.5 × 0.5^(age_days / 365))`. Recency only re-orders filings that already passed the gate, so a new but irrelevant filing can never outrank an older relevant one. The floor of 0.5 keeps older filings in play, since AD/CVD orders typically run for five years.
+   - **Relevance gate:** similarity threshold (0.45), one result per source document (`DISTINCT ON (source_url)`). HTS baseline snapshots are excluded: they are dated by fetch time, so recency treated them as the newest document in every query, and the base duty comes from `get_tariff_rate` anyway.
+   - **Ranking:** `score = similarity × (0.75 + 0.25 × 0.5^(age_days / 365))`. Recency re-orders what passed the gate, so the newest filing in a case comes first; the floor of 0.75 keeps older filings in play, since AD/CVD orders typically run for five years. Recency is only safe if the gate actually removes irrelevant filings. Both values were chosen with the eval set below.
 
    `get_market_events(country, ingredient)` returns two labelled groups: filings whose title or summary names the ingredient (newest first, up to 10), and the latest country-wide Section 301 actions, marked as not confirmed to cover the ingredient. With no matching filing it says "no filing in this data names X", not "no duties". It rejects "United States" as the country (every filing is a U.S. action *on* imports), which the model sometimes confused. `get_tariff_rate` returns the base (MFN) duty for an ingredient from the USITC tariff schedule, explicitly labelled as excluding AD/CVD and Section 301 duties; column-2 and special-program rates are left out because they don't apply to the sourcing countries and the model kept quoting them.
 4. A system prompt restricts the model to tool results, requires a publication date and source link for every filing mentioned, asks it to lead with the most recent evidence, and to report base duty and AD/CVD duties separately rather than adding them up. It must not present a filing about another product as relevant, must not guess whether a Section 301 action covers the ingredient, and must call both the filings and tariff tools for any risk or duty question. Requests use `temperature: 0` and a fixed `seed`, so the same question gives the same tool calls. A failing tool returns an error message to the model instead of failing the request.
 5. The final answer is stored in `recommendations` together with the full tool-call trace (`reasoning_trace` JSONB): which tool, which arguments, in which round.
+
+---
+
+## Retrieval evaluation
+
+The first version of the ranking rested on an assumption I had not tested: that the 0.30 similarity gate removes irrelevant filings, so recency only re-orders relevant ones. To test it I built a small eval set in [`eval/`](eval):
+
+- **17 queries** in six categories: exact product + country, abbreviation ("MSG"), paraphrase ("food thickener" for xanthan gum), country-wide actions, products with no filing in the data, and an out-of-domain query.
+- **164 (query, filing) pairs**, pooled from the top 5 of every configuration tested and graded by hand: 2 = about this product (and country), 1 = partially useful (e.g. a country-wide Section 301 action), 0 = not useful.
+- **Metrics:** precision and recall@5 for the gate; nDCG@5 and "newest relevant filing first" for the ranking; junk returned for queries that have no answer.
+
+| Configuration | Precision | Recall@5 | nDCG@5 | Newest relevant first | Junk per no-answer query |
+|---|---|---|---|---|---|
+| Before: gate 0.30, recency weight 0.5, all event types | 0.60 | 0.73 | 0.78 | 77% | 4.25 |
+| Reference: gate 0.45, recency off | 0.90 | 0.98 | 0.99 | 42% | 3.60 |
+| **Now: gate 0.45, recency weight 0.25, HTS baselines excluded** | **0.82** | **0.90** | **0.93** | **75%** | **3.60** |
+
+With HTS baselines excluded, the stevia query has no matching filing left (its only relevant result was the stevia base duty, which `get_tariff_rate` provides), so the last two rows average junk over 5 no-answer queries instead of 4.
+
+What the data showed:
+
+1. **The 0.30 gate removed nothing.** Every filing in this corpus is trade-policy text, so with `text-embedding-3-small` even unrelated filings score above 0.30 (irrelevant pairs: median 0.46, max 0.60). Thresholds of 0.20, 0.25 and 0.30 returned identical results.
+2. **So recency was promoting new irrelevant filings.** Turning recency off raised nDCG@5 from 0.78 to 0.99 but put the newest relevant filing first only 23% of the time. A smaller weight (0.25) keeps most of the freshness benefit at a small relevance cost.
+3. **HTS baseline snapshots looked like the newest documents** because they are dated by fetch time, and appeared as junk in queries about other products.
+4. **No single threshold separates relevant from irrelevant.** Relevant pairs: median similarity 0.64, 10th percentile 0.48. A gate at 0.45 keeps 95% of relevant pairs but removes only 44% of junk; 0.55 removes 84% of junk but loses 30% of relevant pairs and leaves 3 answerable queries with no result. Queries with no answer still get ~3.6 irrelevant filings. The next step is a second signal, such as a keyword match on the product name (hybrid retrieval), rather than a higher threshold.
+5. **The embedding barely encodes the country.** After tuning, most queries reach nDCG@5 1.00 and the abbreviation query "MSG tariff China" rose from 0.47 to 0.86. The weakest is now "antidumping duty on glycine from China" (0.48): glycine filings from India rank above those from China. Country is a structured fact and belongs in a filter, as `get_market_events` already does, not in vector similarity.
+
+Labeling also surfaced data problems that are now tracked in [KNOWN_ISSUES.md](KNOWN_ISSUES.md): a placeholder value `All (MFN)` in the `country` column, multi-country filings stored as one row per country, Section 301 notices classified differently depending on the source API, and one filing extracted with the wrong country.
+
+**Caveats:** 17 queries graded by one person on a local snapshot of the data. The numbers show direction, not precision; values were picked at the point where the trade-off flattens rather than at the single best score, to avoid fitting this small set. Full results: [`eval/results.md`](eval/results.md), [`eval/similarity.md`](eval/similarity.md); method and labeling rules: [`eval/README.md`](eval/README.md).
 
 ---
 
@@ -235,7 +267,10 @@ Not built yet (tracked in [KNOWN_ISSUES.md](KNOWN_ISSUES.md)):
 
 - [ ] **HTTPS on the API** (the Vercel → EC2 hop is plain HTTP today)
 - [ ] Shared rate limiter for the dashboard proxy
-- [ ] Evaluation set for retrieval threshold and answer groundedness
+- [x] Retrieval eval set (17 labeled queries) and tuning of the gate and recency weight
+- [ ] Second signal for the relevance gate, e.g. a keyword match on the product name (hybrid retrieval); re-measure with the same eval set
+- [ ] One row per filing with a filing–country table, so multi-country filings keep all their countries
+- [ ] Answer groundedness evaluation
 - [ ] Unit tests (pure functions and the auth filter first)
 
 **Deliberately out of scope:** streaming responses, fine-tuning, multi-agent setups, Kubernetes/microservices. None of them are warranted at this scale.
@@ -290,6 +325,7 @@ frontend/                             # Next.js + TypeScript dashboard (BFF)
 db/                                   # SQL migrations
 deploy/setup_pipeline.sh              # idempotent EC2 provisioning
 scripts/agent_smoke_test.sh           # end-to-end agent check against a running backend
+eval/                                 # retrieval evaluation: query set, human labels, script, results
 KNOWN_ISSUES.md                       # known limitations and changelog
 ```
 

@@ -37,3 +37,6 @@ application-local.properties
 
 embedding-script/.env
 embedding-script/.venv/
+### retrieval eval ###
+eval/.cache/
+__pycache__/
