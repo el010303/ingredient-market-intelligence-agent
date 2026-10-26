@@ -30,6 +30,10 @@ public class AgentToolService {
     // documents in every query. The base duty is served by get_tariff_rate instead.
     static final String EXCLUDED_FROM_SEARCH = "hts_rate_baseline";
     static final int MAX_RESULTS = 5;
+    // When nothing passes the gate, the closest few filings are returned anyway, labeled as low
+    // confidence (see searchMarketEventsAsText).
+    static final int FALLBACK_RESULTS = 3;
+    private static final double NO_GATE = -1.0; // cosine similarity is never below -1
     static final int MAX_EVENTS_PER_COUNTRY = 10;
 
     public AgentToolService(IngredientRepository ingredientRepository,
@@ -171,6 +175,26 @@ public class AgentToolService {
 
     public String searchMarketEventsAsText(String query) {
         String queryVector = embeddingService.embed(query);
+        List<String> lines = searchByVector(queryVector, SIMILARITY_THRESHOLD, MAX_RESULTS);
+        if (!lines.isEmpty()) {
+            return String.join("\n", lines);
+        }
+        // Nothing passed the gate. The model tends to send short keyword queries, and those score
+        // lower against every filing than the full questions the gate was tuned on: for
+        // "amino acids supplements" the five closest filings were all glycine filings, at
+        // similarity 0.32-0.34, so the gate dropped a correct ranking and the agent answered
+        // "no filings". Return the closest few, labeled, and let the model judge them; the system
+        // prompt already forbids presenting another product's filing as relevant.
+        List<String> closest = searchByVector(queryVector, NO_GATE, FALLBACK_RESULTS);
+        if (closest.isEmpty()) {
+            return "No semantically relevant market events found.";
+        }
+        return "LOW CONFIDENCE: no filing passed the relevance threshold. These are the closest matches;"
+            + " use only those that are actually about what was asked.\n"
+            + String.join("\n", closest);
+    }
+
+    private List<String> searchByVector(String queryVector, double threshold, int limit) {
         // 1) Inner query: relevance gate (similarity threshold) + one row per source document.
         // 2) Outer query: rank by similarity x recency factor, where
         //      recency factor = (1 - w) + w * 0.5^(age_days / half_life)
@@ -194,7 +218,7 @@ public class AgentToolService {
             ORDER BY score DESC
             LIMIT ?
             """;
-        List<String> lines = jdbcTemplate.query(sql,
+        return jdbcTemplate.query(sql,
             (rs, i) -> "- " + rs.getString("title")
                 + " | country: " + rs.getString("country")
                 + " | published: " + rs.getDate("event_date")
@@ -204,12 +228,8 @@ public class AgentToolService {
                 + " | source: " + rs.getString("source_url"),
             RECENCY_WEIGHT, RECENCY_WEIGHT,
             RECENCY_WEIGHT, RECENCY_WEIGHT, RECENCY_HALF_LIFE_DAYS,
-            queryVector, queryVector, SIMILARITY_THRESHOLD, EXCLUDED_FROM_SEARCH, queryVector,
-            MAX_RESULTS);
-        if (lines.isEmpty()) {
-            return "No semantically relevant market events found.";
-        }
-        return String.join("\n", lines);
+            queryVector, queryVector, threshold, EXCLUDED_FROM_SEARCH, queryVector,
+            limit);
     }
 
     // get_tariff_rate: U.S. base (general/MFN) duty from the USITC HTS for an ingredient

@@ -5,10 +5,16 @@ Measures the semantic retrieval behind the `search_market_events` tool
 
 | Job | Production setting | Question | Metrics |
 |---|---|---|---|
-| **Relevance gate** | similarity > 0.45, one row per source document, HTS baseline snapshots excluded (before tuning: 0.30, baselines included) | Does it let relevant filings through and keep irrelevant ones out? | Precision, Recall@5, no-answer junk |
+| **Relevance gate** | similarity > 0.45, one row per source document, HTS baseline snapshots excluded (before tuning: 0.30, baselines included). If nothing passes, the 3 closest filings are returned as low confidence | Does it let relevant filings through and keep irrelevant ones out? | Precision, Recall@5, no-answer junk |
 | **Ranking** | `similarity × (0.75 + 0.25 × 0.5^(age_days / 365))` (before tuning: weight 0.5) | Does recency put the newest relevant filing first without lifting less relevant filings above more relevant ones? | nDCG@5, newest relevant first |
 
 The script runs every combination of threshold (0.30–0.55) and recency weight (0.5, 0.25 = production, 0 = off), each with and without HTS baseline snapshots (`hts_rate_baseline`), so the production setting is compared against its neighbours instead of being judged in isolation. Baseline snapshots are tested separately because they are dated by fetch time, not by a real event, and the base duty is already served by the `get_tariff_rate` tool.
+
+## Tuning queries and agent-sent queries
+
+`q01`–`q17` were written by hand as full questions, and the gate and recency weight were chosen on them. The agent, however, rewrites the user's question before searching, usually into a few keywords ("amino acids supplements"), and such queries score lower against every filing. `q18`–`q19` (category `agent_query`) are searches the agent actually sent in the smoke test. They are pooled and labeled like the others but kept out of the config tables, so they act as a check on whether the tuning carries over to real agent queries. `similarity` reports their similarity distribution separately; `score` lists them in the per-query table.
+
+The per-query table also mirrors the production fallback: when nothing passes the gate, production returns the 3 closest filings labeled as low confidence, and those are what is scored (marked †). The config tables measure the gate alone, so "Answerable with 0 results" there still shows where the gate would have returned nothing.
 
 ## Workflow
 
@@ -36,7 +42,7 @@ python eval/retrieval_eval.py score --out eval/results.md
 | **0** not useful | Another product, or another country with no link to the query. |
 
 Notes:
-- Paraphrase queries (`q09` "amino acid supplement", `q10` "food thickener") are graded by the product they describe (glycine, xanthan gum), not by the words used.
+- Paraphrase queries (`q09` "amino acid supplement", `q10` "food thickener") are graded by the product they describe (glycine, xanthan gum), not by the words used. The same goes for the agent-sent `q18` (glycine) and `q19` (xanthan gum); they name no country, so any country counts as relevant.
 - Multi-country filings share one `source_url`, and the gate keeps one row per URL (known issue R3), so the `country` column may show one of several countries. Grade by what the title says.
 - Queries in the `no_answer` and `out_of_domain` categories are expected to have no grade-2 filing. Whether a query counts as answerable is decided by the labels, not by its category: if the data does contain a stevia filing, `q13` simply becomes answerable.
 
@@ -57,7 +63,7 @@ Raising the threshold should trade Recall for Precision and cleaner no-answer be
 
 | File | Committed | Purpose |
 |---|---|---|
-| `queries.json` | yes | 17 queries: exact, abbreviation, paraphrase, country-wide, no-answer, out-of-domain |
+| `queries.json` | yes | 17 tuning queries (exact, abbreviation, paraphrase, country-wide, no-answer, out-of-domain) and 2 agent-sent queries |
 | `retrieval_eval.py` | yes | `dump` and `score`; the SQL mirrors production |
 | `labels.csv` | yes | Human relevance grades (the eval set) |
 | `results.md` | yes | Output of the last `score --out` run |

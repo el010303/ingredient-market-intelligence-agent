@@ -1,5 +1,5 @@
 {
-  "_comment": "Retrieval eval queries for search_market_events. 'terms' are the product names a relevant filing must mention; 'country' is the exporting country the query asks about (null = any). 'intent' drives the suggested grade only; the final grade is always a human decision in labels.csv.",
+  "_comment": "Retrieval eval queries for search_market_events. 'terms' are the product names a relevant filing must mention; 'country' is the exporting country the query asks about (null = any). 'intent' drives the suggested grade only; the final grade is always a human decision in labels.csv. Category 'agent_query' = a search the agent actually sent (from the smoke test); reported per query, not used for tuning.",
   "queries": [
     {"id": "q01", "category": "exact",        "intent": "product",      "text": "glycine tariff risk from India",                  "terms": ["glycine"],                              "country": "India"},
     {"id": "q02", "category": "exact",        "intent": "product",      "text": "antidumping duty on glycine from China",          "terms": ["glycine"],                              "country": "China"},
@@ -17,6 +17,8 @@
     {"id": "q14", "category": "no_answer",    "intent": "product",      "text": "gelatin import duty Brazil",                      "terms": ["gelatin"],                              "country": "Brazil"},
     {"id": "q15", "category": "no_answer",    "intent": "product",      "text": "sucralose antidumping China",                     "terms": ["sucralose"],                            "country": "China"},
     {"id": "q16", "category": "no_answer",    "intent": "product",      "text": "ascorbic acid vitamin C duties",                  "terms": ["ascorbic acid", "vitamin c"],           "country": null},
-    {"id": "q17", "category": "out_of_domain","intent": "product",      "text": "coffee bean tariffs Colombia",                    "terms": ["coffee"],                               "country": "Colombia"}
+    {"id": "q17", "category": "out_of_domain","intent": "product",      "text": "coffee bean tariffs Colombia",                    "terms": ["coffee"],                               "country": "Colombia"},
+    {"id": "q18", "category": "agent_query",  "intent": "product",      "text": "amino acids supplements",                         "terms": ["glycine"],                              "country": null},
+    {"id": "q19", "category": "agent_query",  "intent": "product",      "text": "dumping cases food thickeners",                   "terms": ["xanthan gum"],                          "country": null}
   ]
 }

@@ -99,7 +99,7 @@ The dashboard runs on Vercel; everything else runs on one EC2 instance: Spring B
 1. `GET /api/agent/query?q=...` with an `X-API-Key` header (custom Spring Security filter, constant-time comparison).
 2. `AgentOrchestrationService` sends the question to `gpt-4o-mini` with four tool definitions and runs a bounded loop (max 4 rounds): the model chooses tools, the service executes them against PostgreSQL, results go back to the model as `tool` messages.
 3. `search_market_events` embeds the query and runs a pgvector cosine search in two stages:
-   - **Relevance gate:** similarity threshold (0.45), one result per source document (`DISTINCT ON (source_url)`). HTS baseline snapshots are excluded: they are dated by fetch time, so recency treated them as the newest document in every query, and the base duty comes from `get_tariff_rate` anyway.
+   - **Relevance gate:** similarity threshold (0.45), one result per source document (`DISTINCT ON (source_url)`). HTS baseline snapshots are excluded: they are dated by fetch time, so recency treated them as the newest document in every query, and the base duty comes from `get_tariff_rate` anyway. If nothing passes, the three closest filings are returned under a "low confidence" label instead of an empty result (see finding 6 below).
    - **Ranking:** `score = similarity × (0.75 + 0.25 × 0.5^(age_days / 365))`. Recency re-orders what passed the gate, so the newest filing in a case comes first; the floor of 0.75 keeps older filings in play, since AD/CVD orders typically run for five years. Recency is only safe if the gate actually removes irrelevant filings. Both values were chosen with the eval set below.
 
    `get_market_events(country, ingredient)` returns two labelled groups: filings whose title or summary names the ingredient (newest first, up to 10), and the latest country-wide Section 301 actions, marked as not confirmed to cover the ingredient. With no matching filing it says "no filing in this data names X", not "no duties". It rejects "United States" as the country (every filing is a U.S. action *on* imports), which the model sometimes confused. `get_tariff_rate` returns the base (MFN) duty for an ingredient from the USITC tariff schedule, explicitly labelled as excluding AD/CVD and Section 301 duties; column-2 and special-program rates are left out because they don't apply to the sourcing countries and the model kept quoting them.
@@ -131,10 +131,11 @@ What the data showed:
 3. **HTS baseline snapshots looked like the newest documents** because they are dated by fetch time, and appeared as junk in queries about other products.
 4. **No single threshold separates relevant from irrelevant.** Relevant pairs: median similarity 0.64, 10th percentile 0.48. A gate at 0.45 keeps 95% of relevant pairs but removes only 44% of junk; 0.55 removes 84% of junk but loses 30% of relevant pairs and leaves 3 answerable queries with no result. Queries with no answer still get ~3.6 irrelevant filings. The next step is a second signal, such as a keyword match on the product name (hybrid retrieval), rather than a higher threshold.
 5. **The embedding barely encodes the country.** After tuning, most queries reach nDCG@5 1.00 and the abbreviation query "MSG tariff China" rose from 0.47 to 0.86. The weakest is now "antidumping duty on glycine from China" (0.48): glycine filings from India rank above those from China. Country is a structured fact and belongs in a filter, as `get_market_events` already does, not in vector similarity.
+6. **The agent does not search with the kind of query the gate was tuned on.** An end-to-end smoke test caught what the offline eval could not. Asked "What trade cases involve amino acids used in supplements?", the model searched for "amino acids supplements". The five closest filings were all glycine filings, so the ranking was right, but their similarity was only 0.32–0.34 and the gate returned nothing. The eval-style wording "amino acid supplement duties from India" scores 0.51 against the same filings, and for the agent's "dumping cases food thickeners" only one of five xanthan gum filings (0.44–0.46) passes the gate. Short keyword queries score lower against every filing, so a fixed similarity threshold means something different for each query. Lowering the gate would not help, because 0.32–0.34 is where irrelevant filings sit for other queries. Instead, search falls back to the three closest filings, labeled low confidence, and the model judges them. The cost is on queries with no answer: "ascorbic acid vitamin C duties", the one no-answer query the gate used to clean completely, now gets three low-confidence filings, which the system prompt forbids presenting as relevant. Missing a real case is worse for a buyer than being shown a labeled near-miss, and the model can filter a near-miss but cannot recover a filing it never saw. The queries the agent actually sent are now in the eval set as a separate category, reported but not used for tuning.
 
 Labeling also surfaced data problems that are now tracked in [KNOWN_ISSUES.md](KNOWN_ISSUES.md): a placeholder value `All (MFN)` in the `country` column, multi-country filings stored as one row per country, Section 301 notices classified differently depending on the source API, and one filing extracted with the wrong country.
 
-**Caveats:** 17 queries graded by one person on a local snapshot of the data. The numbers show direction, not precision; values were picked at the point where the trade-off flattens rather than at the single best score, to avoid fitting this small set. Full results: [`eval/results.md`](eval/results.md), [`eval/similarity.md`](eval/similarity.md); method and labeling rules: [`eval/README.md`](eval/README.md).
+**Caveats:** 17 tuning queries graded by one person on a local snapshot of the data. The numbers show direction, not precision; values were picked at the point where the trade-off flattens rather than at the single best score, to avoid fitting this small set. Full results: [`eval/results.md`](eval/results.md), [`eval/similarity.md`](eval/similarity.md); method and labeling rules: [`eval/README.md`](eval/README.md).
 
 ---
 
@@ -268,6 +269,7 @@ Not built yet (tracked in [KNOWN_ISSUES.md](KNOWN_ISSUES.md)):
 - [ ] **HTTPS on the API** (the Vercel → EC2 hop is plain HTTP today)
 - [ ] Shared rate limiter for the dashboard proxy
 - [x] Retrieval eval set (17 labeled queries) and tuning of the gate and recency weight
+- [ ] Eval queries taken from the searches the agent actually sends (`recommendations.reasoning_trace`), then re-tune
 - [ ] Second signal for the relevance gate, e.g. a keyword match on the product name (hybrid retrieval); re-measure with the same eval set
 - [ ] One row per filing with a filing–country table, so multi-country filings keep all their countries
 - [ ] Answer groundedness evaluation
@@ -298,7 +300,7 @@ python embed_consumer.py
 # 5. Trigger one ingestion run (local profile only), then query
 curl http://localhost:8080/test/run-ingestion
 curl -H "X-API-Key: <your local key>" "http://localhost:8080/api/agent/query?q=glycine%20tariff%20risk"
-./scripts/agent_smoke_test.sh    # 5 questions (incl. positive cases) + a repeatability check; prints each tool call and answer
+./scripts/agent_smoke_test.sh    # 5 ingredient questions, 3 semantic-search checks (PASS/WARN/FAIL), a repeatability check
 
 # 6. Dashboard (frontend/.env.local: BACKEND_URL, BACKEND_API_KEY; see .env.local.example)
 cd frontend && npm install && npm run dev    # http://localhost:3000

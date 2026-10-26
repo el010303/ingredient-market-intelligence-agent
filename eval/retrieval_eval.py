@@ -16,8 +16,13 @@ Workflow (see eval/README.md):
   python eval/retrieval_eval.py similarity  # similarity distribution by grade: where should the gate be?
   python eval/retrieval_eval.py score       # metrics per config as Markdown tables
 
-The SQL below mirrors AgentToolService.searchMarketEventsAsText. If you change the
-production query, change it here too, or the numbers stop describing production.
+The SQL below mirrors AgentToolService.searchMarketEventsAsText, including its fallback (the
+closest FALLBACK_RESULTS filings when nothing passes the gate). If you change the production
+query, change it here too, or the numbers stop describing production.
+
+Queries in the `agent_query` category are searches the agent actually sent. They are pooled,
+labeled and shown per query, but left out of the config tables used to choose the values, so
+they work as a check on whether the tuning carries over to real agent queries.
 """
 
 import argparse
@@ -46,6 +51,9 @@ BEFORE = (0.30, 0.5, False)                  # the untuned setting the first eva
 THRESHOLDS = [0.30, 0.35, 0.40, 0.45, 0.50, 0.55]
 RECENCY_WEIGHTS = [0.5, 0.25, 0.0]           # 0.0 = recency off, score = similarity
 GATE_SWEEP = [0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60]
+FALLBACK_RESULTS = 3                         # AgentToolService.FALLBACK_RESULTS
+NO_GATE = -1.0                               # the fallback runs the same query with no threshold
+AGENT_CATEGORY = "agent_query"               # searches the agent actually sent; reported, never tuned on
 
 LABEL_FIELDS = ["query_id", "query", "source_url", "title", "country", "event_date",
                 "event_type", "suggested", "grade"]
@@ -146,6 +154,14 @@ def configs():
 def run_all(queries, retriever):
     """{(threshold, weight, exclude_baselines): {query_id: [Row, ...]}} for every config."""
     return {cfg: {q["id"]: retriever(q, *cfg) for q in queries} for cfg in configs()}
+
+
+def production_fallback(queries, results, retriever):
+    """{query_id: [Row, ...]} for queries where nothing passes the production gate: production
+    then returns the FALLBACK_RESULTS closest filings, ranked the same way."""
+    _, w, ex = PRODUCTION
+    return {q["id"]: retriever(q, NO_GATE, w, ex, FALLBACK_RESULTS)
+            for q in queries if not results[PRODUCTION][q["id"]]}
 
 
 # ---------------------------------------------------------------- labels
@@ -296,18 +312,26 @@ def config_table(summaries, title):
     return lines
 
 
-def report(results, label_map, queries, k, as_of):
+def report(results, fallback, label_map, queries, k, as_of):
+    tuning_ids = {q["id"] for q in queries if q["category"] != AGENT_CATEGORY}
     lines = [f"Retrieval eval, top-{k}, as of {as_of}. Answerable = at least one grade-2 filing in the pool.",
-             "Recency = weight of the age factor (0.00 = off).", ""]
+             "Recency = weight of the age factor (0.00 = off).",
+             f"Config tables: the {len(tuning_ids)} hand-written tuning queries. Agent-sent queries "
+             f"(`{AGENT_CATEGORY}`) appear only in the per-query table.", ""]
     pools = {False: label_map, True: without_baselines(label_map)}
     summaries = {False: {}, True: {}}
     for (t, w, ex), per_query in results.items():
         metrics = {qid: query_metrics(hits, pools[ex].get(qid, {}), k) for qid, hits in per_query.items()}
-        summaries[ex][(t, w, ex)] = (summarize(metrics), metrics)
+        tuning = {qid: m for qid, m in metrics.items() if qid in tuning_ids}
+        summaries[ex][(t, w, ex)] = (summarize(tuning), metrics)
+    prod_pool = pools[PRODUCTION[2]]
+    fallback_metrics = {qid: query_metrics(hits, prod_pool.get(qid, {}), k) for qid, hits in fallback.items()}
     lines += config_table(summaries[False], "All event types (behaviour before tuning)")
     lines += [""] + config_table(summaries[True], "HTS baseline snapshots excluded from semantic search (production)")
 
-    total_unlabeled = sum(s["unlabeled"] for group in summaries.values() for s, _ in group.values())
+    total_unlabeled = (sum(m["unlabeled"] for group in summaries.values() for _, ms in group.values()
+                           for m in ms.values())
+                       + sum(m["unlabeled"] for m in fallback_metrics.values()))
     if total_unlabeled:
         lines += ["", f"WARNING: {total_unlabeled} returned results have no grade and were scored as 0. "
                       "Run `dump` again and label the new rows."]
@@ -318,10 +342,14 @@ def report(results, label_map, queries, k, as_of):
               "| Query | Category | Returned | Relevant returned / in pool | nDCG@5 | Junk |",
               "|---|---|---|---|---|---|"]
     for q in queries:
-        m = prod_metrics[q["id"]]
+        m = fallback_metrics.get(q["id"], prod_metrics[q["id"]])
+        mark = " †" if q["id"] in fallback_metrics else ""
         ndcg = fmt(m["ndcg"]) if m["answerable"] else "–"   # nDCG is only meaningful when a relevant filing exists
-        lines.append(f"| {q['id']} {q['text']} | {cat[q['id']]} | {m['returned']} | "
+        lines.append(f"| {q['id']} {q['text']} | {cat[q['id']]} | {m['returned']}{mark} | "
                      f"{m['relevant_returned']} / {m['relevant_total']} | {ndcg} | {m['junk']} |")
+    if fallback_metrics:
+        lines += ["", f"† Nothing passed the gate. Production then returns the {FALLBACK_RESULTS} closest "
+                      "filings, labeled as low confidence; those are what is scored here."]
     return "\n".join(lines)
 
 
@@ -332,14 +360,19 @@ def percentile(sorted_values, p):
     return sorted_values[i]
 
 
-def similarity_report(sims_by_grade):
-    """sims_by_grade: {grade: [similarity, ...]} for every labeled (query, document) pair."""
-    lines = ["### Similarity of labeled pairs by grade", "",
-             "| Grade | Pairs | Min | 10th pct | Median | 90th pct | Max |", "|---|---|---|---|---|---|---|"]
+def grade_table(sims_by_grade):
+    lines = ["| Grade | Pairs | Min | 10th pct | Median | 90th pct | Max |", "|---|---|---|---|---|---|---|"]
     for g in (2, 1, 0):
         s = sorted(sims_by_grade.get(g, []))
         lines.append(f"| {g} | {len(s)} | {fmt(percentile(s, 0))} | {fmt(percentile(s, 0.1))} | "
                      f"{fmt(percentile(s, 0.5))} | {fmt(percentile(s, 0.9))} | {fmt(percentile(s, 1))} |")
+    return lines
+
+
+def similarity_report(sims_by_grade, agent_sims=None):
+    """sims_by_grade / agent_sims: {grade: [similarity, ...]} for the labeled (query, document)
+    pairs of the tuning queries and of the agent-sent queries."""
+    lines = ["### Similarity of labeled pairs by grade (tuning queries)", ""] + grade_table(sims_by_grade)
     rel, junk = sims_by_grade.get(2, []), sims_by_grade.get(0, [])
     lines += ["", "### What a gate at each threshold would do", "",
               "| Threshold | Relevant (grade 2) kept | Junk (grade 0) removed |", "|---|---|---|"]
@@ -348,6 +381,11 @@ def similarity_report(sims_by_grade):
         removed = sum(1 for s in junk if s <= t) / len(junk) if junk else None
         mark = " **(production)**" if t == PRODUCTION[0] else " (before tuning)" if t == BEFORE[0] else ""
         lines.append(f"| {t:.2f}{mark} | {fmt(kept, True)} | {fmt(removed, True)} |")
+    if agent_sims:
+        agent_rel = agent_sims.get(2, [])
+        kept = sum(1 for s in agent_rel if s > PRODUCTION[0]) / len(agent_rel) if agent_rel else None
+        lines += ["", f"### Agent-sent queries (`{AGENT_CATEGORY}`, not used for tuning)", ""] + grade_table(agent_sims)
+        lines += ["", f"The production gate ({PRODUCTION[0]:.2f}) keeps {fmt(kept, True)} of their relevant pairs."]
     return "\n".join(lines)
 
 
@@ -381,17 +419,21 @@ def main(argv=None):
             if not label_rows:
                 sys.exit(f"No graded rows in {args.labels}. Run `dump` and label first.")
             texts = {q["id"]: q["text"] for q in queries}
-            sims = {}
+            agent_ids = {q["id"] for q in queries if q["category"] == AGENT_CATEGORY}
+            sims, agent_sims = {}, {}
             for r in label_rows:
                 s = doc_similarity(cur, embed(texts[r["query_id"]], cache), r["source_url"])
                 if s is not None:
-                    sims.setdefault(int(r["grade"]), []).append(s)
-            text = similarity_report(sims)
+                    target = agent_sims if r["query_id"] in agent_ids else sims
+                    target.setdefault(int(r["grade"]), []).append(s)
+            text = similarity_report(sims, agent_sims)
         else:
-            results = run_all(queries, lambda q, t, w, ex: retrieve(
-                cur, embed(q["text"], cache), t, w, args.k, args.as_of, ex))
+            def retriever(q, t, w, ex, k=args.k):
+                return retrieve(cur, embed(q["text"], cache), t, w, k, args.as_of, ex)
+            results = run_all(queries, retriever)
+            fallback = production_fallback(queries, results, retriever)
             if args.command == "dump":
-                rows, added = merge_pool(read_labels(args.labels), queries, results)
+                rows, added = merge_pool(read_labels(args.labels), queries, {**results, "fallback": fallback})
                 write_labels(args.labels, rows)
                 todo = sum(1 for r in rows if r["grade"].strip() == "")
                 print(f"{added} new (query, filing) pairs added to {args.labels}; {todo} rows still need a grade.")
@@ -400,7 +442,7 @@ def main(argv=None):
             label_rows = read_labels(args.labels)
             if not label_rows:
                 sys.exit(f"No labels in {args.labels}. Run `dump` first.")
-            text = report(results, grades_by_query(label_rows), queries, args.k, args.as_of)
+            text = report(results, fallback, grades_by_query(label_rows), queries, args.k, args.as_of)
     finally:
         conn.close()
         save_cache(cache_path, cache)

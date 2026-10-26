@@ -56,14 +56,20 @@ if not searches:
     print("  WARN  search_market_events was not called, so this run did not test semantic search")
     sys.exit()
 for c in searches:
-    top = str(c.get("resultPreview", "")).split("\n")[0]
+    lines = str(c.get("resultPreview", "")).split("\n")
+    # When nothing passes the similarity gate, the tool returns the closest filings under a
+    # "LOW CONFIDENCE" header instead of an empty result.
+    fallback = lines[0].startswith("LOW CONFIDENCE")
+    top = lines[1] if fallback and len(lines) > 1 else lines[0]
     print("  top result: " + top[:200])
     if top.startswith("Tool error"):
         print("  FAIL  search_market_events returned an error (check the backend log)")
     elif top.startswith("No semantically relevant"):
-        print("  FAIL  search returned nothing: the gate dropped every filing")
+        print("  FAIL  search returned nothing")
     elif expect and expect not in top.lower():
         print("  WARN  top result does not mention %r" % expect)
+    elif fallback:
+        print("  PASS  (nothing passed the gate; closest matches returned as low confidence)")
     else:
         print("  PASS")
 '
@@ -80,6 +86,10 @@ echo "=================== semantic search (search_market_events) ===============
 search_check "Any recent dumping cases on food thickeners?" "xanthan"
 search_check "What trade cases involve amino acids used in supplements?" "glycine"
 search_check "Which food additives have had recent antidumping or countervailing duty cases?"
+# No filing in the data is about vitamins. An open question like this goes to search_market_events,
+# which can only return near-misses (low confidence, or other products that passed the gate). Read
+# the answer: it must say no filing is about vitamins and must not present another product's case.
+ask "Which vitamins have had antidumping or countervailing duty cases?"
 
 echo "=================== consistency: same question 3 times ==================="
 for i in 1 2 3; do
